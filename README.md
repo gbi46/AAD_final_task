@@ -861,6 +861,132 @@ RUN_LIVE_CREWAI=1 .venv-crewai/bin/python -m pytest tests/test_mas_crewai.py -v 
 `crewai` там не встановлено навмисно; звичайний `pytest tests/` лишається
 зеленим без жодної зміни поведінки.
 
+## Fair Comparison: LangGraph vs CrewAI (S15, Bonus Level)
+
+`compare_frameworks.py` — ОДНАКОВІ запити (той самий текст, що й EVAL-01..04
+у `evals.py`) через ОБИДВА фреймворки, **обидва live** (план прямо
+забороняє порівнювати demo LangGraph з live CrewAI): `provider="openrouter"`,
+той самий `OPENROUTER_MODEL` (`anthropic/claude-sonnet-4.6`), та сама
+`temperature=0.1` (зафіксовано в обох `_build_llm`). LangGraph ТАКОЖ
+підключений через `MASApp.connect_mcp()` (реальний MCP subprocess, не
+local wrappers за замовчуванням) — щоб порівняння було чесним 1:1 з тим,
+як `mas_crewai.py` завжди викликає tools. 1 warm-up запит ("Привіт!") на
+фреймворк перед вимірюваними — відкинутий з результатів. **N=1 на
+сценарій, без повторів** (живі LLM-виклики коштують реальні токени) —
+методологічне обмеження, задокументоване чесно нижче, а не приховане.
+
+### Виміряні результати (`comparison_results.json`)
+
+| Сценарій | Framework | Latency | Tokens (in/out/total) | Agents | Успіх |
+|---|---|---|---|---|---|
+| EVAL-01 simple | LangGraph | 16.7s | 6069/430/**6499** | billing | ✅ 312 EUR коректно |
+| EVAL-01 simple | CrewAI | 40.8s | 29552/7912/**37464** | Coordinator→Billing | ✅ 312 EUR цитується |
+| EVAL-02 multi-step | LangGraph | 21.5s | 3081/789/**3870** | tech | ✅ дощ/15°C, 2 tools |
+| EVAL-02 multi-step | CrewAI | 42.1s | 27484/7376/**34860** | Coordinator→Tech | ✅ дощ/15°C, 2 tools |
+| EVAL-03 RAG-heavy | LangGraph | 6.8s | 1865/136/**2001** | researcher | ✅ цитує [travel-04] |
+| EVAL-03 RAG-heavy | CrewAI | 58.1s | 31308/11752/**43060** | Coordinator→Researcher | ⚠️ правильно, але домішує невіримі деталі (див. нижче) |
+| EVAL-04 cross-agent | LangGraph | 4.2s | 1014/90/**1104** | **general** | ❌ live-supervisor помилково класифікував як general (не tech) |
+| EVAL-04 cross-agent | CrewAI | 111.5s | 71740/22880/**94620** | Coordinator→Tech→Billing | ✅ реальний подвійний delegate (tech і billing) |
+
+**LOC** (`count_loc.py`, одне фіксоване правило — не порожні/не чисто
+коментарні рядки, framework-specific окремо від shared):
+
+| Категорія | Файли | LOC |
+|---|---|---|
+| LangGraph-specific | `mas_langgraph.py` (1133) + `hitl.py` (158) | **1291** |
+| CrewAI-specific | `mas_crewai.py` | **238** |
+| Shared (перевикористано БЕЗ ЗМІН обома) | `tools_legacy.py`, `knowledge.py`, `guardrails.py`, `safety.py`, `trajectory_logger.py`, `mcp_server.py` | 1002 |
+
+**Асиметрія обсягу (чесно, не приховано)**: `mas_langgraph.py` реалізує
+ПОВНУ S05–S09 функціональність (4 агенти, guardrail-інтеграція, HITL,
+persistence-хуки); `mas_crewai.py` (S14) — лише 3 спеціалісти+coordinator,
+без HITL/persistence (план S14 цього не вимагає). **1291 проти 238 LOC
+НЕ означає "CrewAI ефективніший в 5 разів"** — це різний обсяг вимог, не
+різна густина коду на еквівалентний функціонал.
+
+**Час розробки — `null`, чесно BLOCKED**: план вимагає "збирати з S01 у
+зовнішньому журналі за реальними робочими сесіями" — таблиця "Active
+Development Sessions" у `codex_review/STEP_LOG.md` порожня з самого S01
+(жодна сесія не логувала реальний робочий час поетапно). Реконструювати
+це заднім числом означало б вигадати число — план прямо це забороняє
+("Не підставляти оцінки як факти"). Тому `dev_time: null` з поясненням у
+`comparison_results.json`, а не оцінка.
+
+### Аналіз
+
+**Швидкість прототипування.** CrewAI дає РОЛЬОВУ структуру (role/goal/
+backstory) швидше на старті — не потрібно вручну проектувати граф і
+routing (`_route_from_supervisor`, `_supervisor_node` у `mas_langgraph.py`
+займають ~90 рядків самого лише маршрутизаційного каркасу). Але "швидше
+написати" ≠ "швидше довести до робочого стану": перший live-прогін
+`mas_crewai.py` впав у РЕАЛЬНИЙ баг фреймворку (`Task(agent=coordinator)`
+ламає delegation, S14) — знадобилось читати вихідний код `crewai/crew.py`,
+щоб знайти причину. Еквівалентного класу прихованих багів у
+`mas_langgraph.py` (S05–S13, 13 кроків, сотні тестів) не траплялось —
+LangGraph-граф явний і детермінований на рівні структури (навіть коли
+маршрутизація сама по собі LLM-driven), тоді як делегація в CrewAI —
+непрозорий механізм, вбудований у сам фреймворк.
+
+**Корисні/незручні абстракції.** CrewAI: `role`/`goal`/`backstory` — це
+дійсно зручний спосіб описати спеціаліста без ручного prompt-engineering
+на кожен вузол. Незручність — Task/Crew API приховує ЗАНАДТО багато:
+`Task(agent=...)` виглядає як очевидний спосіб "прив'язати задачу до
+менеджера", але насправді ламає внутрішній delegation tool (S14) —
+недокументована поведінка, знайдена лише через живий прогін і читання
+джерела. LangGraph: `StateGraph`/`TypedDict` — явний контроль над КОЖНИМ
+переходом (`add_conditional_edges`, S05), явний `MASState` як єдине
+джерело істини — багатослівніше, але жодних прихованих механізмів.
+
+**Контроль handoff.** Це найбільша виміряна відмінність. У LangGraph
+handoff — явний, керований КОДОМ стан (`handoff_context`, `MAX_HANDOFFS=1`,
+`mas_langgraph.py:_tech_node`) — детермінована перевірка ключових слів
+("бюджет"/"вартість"/"коштувати" в цілі), а НЕ рішення LLM. У CrewAI
+handoff — це `delegate_work_to_coworker`, ЩЕ ОДИН LLM-виклик, що вирішує,
+чи й кому делегувати, щоразу. Наслідок видно напряму у вимірюваннях:
+EVAL-04 (cross-agent) у LangGraph live-supervisor ПОМИЛКОВО класифікував
+запит як "general" замість "tech" (наш детермінований `handle_query`
+routing keyword-крок відсутній у live-режимі — сам LLM вирішує) — реальна
+LLM-помилка класифікації складного (двоскладового) запиту, N=1, могла б не
+повторитися при іншому семплі. CrewAI, натомість, УСПІШНО делегував ДВІЧІ
+(tech, потім billing) для того самого запиту — ціна: 111.5с і 94620
+токенів (у 27–86× дорожче за прості LangGraph-запити тут). Явний,
+кодований handoff (LangGraph) дешевший і швидший, коли працює; LLM-
+driven delegation (CrewAI) гнучкіший (може ланцюжком делегувати кільком
+спеціалістам без наперед закодованого правила), але дорожчий і залежить
+від того, чи manager-агент сам вирішить делегувати ще раз.
+
+**Debugging.** LangGraph: кожен крок — окремий запис у `trajectory`
+(`agent_name`/`node_name`/`tool_calls`, S05) плюс повна LangSmith-trace
+ієрархія (S10) — можна побачити ТОЧНО, який вузол що вирішив і чому
+(structured `RouteDecision.reasoning`). Помилку EVAL-04 вище діагностовано
+за 30 секунд саме завдяки цьому — дерево trace показало, що `supervisor`
+дав `action=general` (одна LLM-подія, видна напряму). CrewAI: verbose-вивід
+(Rich console) читабельний для людини в реальному часі, але СТРУКТУРОВАНЕ
+логування agent/tool-подій довелось діставати окремо через
+`crewai.events.crewai_event_bus` (`ToolUsageStartedEvent`,
+`mas_crewai_bench.py`) — за замовчуванням це недоступно як дані, лише як
+текст консолі.
+
+**Вибір для prototype vs production.** Для ШВИДКОГО прототипу з чіткими
+ролями й без потреби в HITL/persistence — CrewAI дає результат швидше
+писати (менше LOC на очевидний кейс, S14: 238 проти повної інтеграції
+S05–S09). Для PRODUCTION-кейсу з реальними грошовими/ризиковими діями
+(наш `book_hotel`) — LangGraph явно виграє: `interrupt()`/
+`Command(resume=...)` (S09) дає СПРАВЖНЮ паузу графа з durable checkpoint;
+у CrewAI еквівалента немає взагалі — саме тому `mas_crewai.py` НЕ дає
+жодному агенту `book_hotel` (S14, чесна, а не імітована відсутність
+HITL). Такий самий висновок і щодо вартості: якщо продукт має великий
+обсяг запитів, LangGraph тут коштує на порядок менше токенів за той
+самий результат (6.5K проти 37-95K) — для production-навантаження це
+пряма економія, не теоретична.
+
+```bash
+python compare_frameworks.py both       # обидва фреймворки, живі виклики
+python compare_frameworks.py langgraph  # лише LangGraph (потребує LANGSMITH_API_KEY для tokens)
+python compare_frameworks.py crewai     # лише CrewAI (підпроцес .venv-crewai)
+python count_loc.py
+```
+
 ## Status
 
 Виконано: S01–S07 (базовий рівень: репозиторій, перевикористані
@@ -877,5 +1003,7 @@ Residual Risks, спираючись на виміряні докази S08–S1
 завершує рівень Expert (S10–S13). S14 (Bonus Level: еквівалентна MAS у
 CrewAI, `mas_crewai.py`, реальний MCP subprocess, per-agent tool
 permissions, живий прогін через `provider="openrouter"`) — виконано.
-Наступний крок — S15 (fair comparison LangGraph vs CrewAI) за планом
-`claude_plan/05_BONUS.md`.
+S15 (fair comparison: обидва фреймворки live на EVAL-01..04, той самий
+модель/temperature, `comparison_results.json` + LOC + аналіз) — виконано,
+це завершує Bonus Level (S14-S15). Наступний крок — S16 (reproducible
+submission) за планом `claude_plan/06_DELIVERY.md`.

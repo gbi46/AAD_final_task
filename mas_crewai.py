@@ -100,12 +100,18 @@ def _build_llm() -> Any:
     підставляють дуже високий `max_tokens` (65536), що перевищує баланс
     тестового ключа (те саме, що й у `mas_langgraph.MASApp._build_llm` для
     ChatOpenAI/OpenRouter, S05/pre-S10) -- `openai.APIStatusError: 402`
-    без явного ліміту."""
+    без явного ліміту.
+
+    `temperature=0.1` -- те саме значення, що й
+    `mas_langgraph.MASApp._build_llm` (обидва провайдери, gemini й
+    openrouter) -- S15 (fair comparison) прямо вимагає зафіксувати
+    однакову температуру для обох фреймворків, інакше порівняння
+    latency/tokens не чесне."""
     from crewai import LLM
 
     slug = os.getenv("OPENROUTER_MODEL", _DEFAULT_MODEL_SLUG)
     max_tokens = int(os.getenv("OPENROUTER_MAX_TOKENS", "4096"))
-    return LLM(model=f"openrouter/{slug}", max_tokens=max_tokens)
+    return LLM(model=f"openrouter/{slug}", max_tokens=max_tokens, temperature=0.1)
 
 
 def _mcp_server_params(runtime_dir: Path) -> Any:
@@ -277,6 +283,34 @@ def run_query(query: str, runtime_dir: Path | None = None) -> str:
         crew = build_crew(runtime_dir, tools_by_agent)
         result = crew.kickoff(inputs={"query": query})
     return str(result)
+
+
+def run_query_with_metrics(query: str, runtime_dir: Path | None = None) -> dict[str, Any]:
+    """Те саме, що `run_query`, але для S15 (fair comparison): додатково
+    повертає `usage_metrics` (`crewai.types.usage_metrics.UsageMetrics` ->
+    prompt/completion/total tokens) і latency_ms. Окрема функція, а не
+    зміна сигнатури `run_query` -- щоб не ламати наявний контракт
+    (S14, `tests/test_mas_crewai.py`)."""
+    import time
+
+    runtime_dir = runtime_dir or (_ROOT / "runtime" / "crewai")
+    started = time.monotonic()
+    with _connected_tools(runtime_dir) as tools_by_agent:
+        crew = build_crew(runtime_dir, tools_by_agent)
+        output = crew.kickoff(inputs={"query": query})
+    latency_ms = int((time.monotonic() - started) * 1000)
+    usage = output.usage_metrics
+    # `usage_metrics` є або `UsageMetrics` (атрибути), або вже `dict`
+    # (спостережено емпірично, S15) -- нормалізуємо обидва випадки.
+    usage_dict = usage if isinstance(usage, dict) else usage.model_dump()
+    return {
+        "answer": str(output),
+        "latency_ms": latency_ms,
+        "prompt_tokens": usage_dict.get("prompt_tokens", 0),
+        "completion_tokens": usage_dict.get("completion_tokens", 0),
+        "total_tokens": usage_dict.get("total_tokens", 0),
+        "successful_requests": usage_dict.get("successful_requests", 0),
+    }
 
 
 if __name__ == "__main__":
