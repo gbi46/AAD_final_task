@@ -6,6 +6,7 @@ langchain==1.4.0
 langchain-core==1.6.2
 langgraph==1.2.11
 langgraph-checkpoint-sqlite==3.1.1
+aiosqlite==0.22.1
 chromadb==1.5.9
 mcp==1.29.1
 langchain-mcp-adapters==0.3.2

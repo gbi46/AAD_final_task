@@ -6,7 +6,7 @@ red-teaming. Базовий рівень (MAS + MCP) у розробці; під
 агентів, guardrails, HITL, observability/evals/red-team і бонусний рівень
 (CrewAI) буде додано на наступних кроках — див. розділ «Статус».
 
-## Домен
+## Domain
 
 Туристична координація: бюджет і бронювання, погодний маршрут та активності,
 туристичні правила й FAQ. Мультиагентна система маршрутизує запит між
@@ -23,14 +23,14 @@ red-teaming. Базовий рівень (MAS + MCP) у розробці; під
 Plan-and-Execute, ChromaDB RAG, TrajectoryLogger, ExecutionGuard) — детальна
 таблиця походження компонентів з'явиться на кроці S02.
 
-## Середовище
+## Environment
 
 - Python 3.12 (перевірено; сумісний діапазон 3.11–3.12).
 - Один LLM-провайдер обирається через змінну середовища `LLM_PROVIDER`
   (за замовчуванням `gemini`, `GEMINI_MODEL=gemini-2.5-flash`) — див.
   `.env.example`. Модель не хардкодиться в коді.
 
-### Встановлення
+### Installation
 
 ```bash
 python3.12 -m venv .venv   # або: python3.12 -m virtualenv .venv
@@ -39,7 +39,7 @@ pip install -r requirements.txt
 cp .env.example .env       # заповнити реальний ключ локально, файл не комітиться
 ```
 
-### Перевірка встановлення
+### Installation Check
 
 ```bash
 python --version
@@ -50,7 +50,7 @@ pip check
 smoke-imports для MCP/LangGraph/ChromaDB/Pydantic) зафіксовано в
 `codex_review/evidence/` поза цим репозиторієм (крок S01).
 
-## Перевикористані компоненти (S02)
+## Reused Components (S02)
 
 Джерело — попередні домашні завдання того ж автора (репозиторії поза цим
 проєктом; шляхи нижче лише пояснюють походження, не є runtime-залежністю).
@@ -65,7 +65,7 @@ smoke-imports для MCP/LangGraph/ChromaDB/Pydantic) зафіксовано в
 | `tests/test_tools.py`, `test_knowledge.py`, `test_safety.py` | ДЗ1 + ДЗ2 | Перенесено й об'єднано під нові імена (`domain_tools` → `tools_legacy`); додано тест ідемпотентності бронювання. Сховище кожного тесту ізольоване через `tempfile`. |
 | `tests/test_trajectory_logger.py` | новий | Раніше `TrajectoryLogger` перевірявся лише опосередковано через `agent.py`; тепер є прямі тести на `agent_name`, санітизацію та відсутність урізання довгих кроків. |
 
-### Запуск тестів
+### Running Tests
 
 ```bash
 source .venv/bin/activate
@@ -74,7 +74,7 @@ python -m pytest tests/ -v
 
 Станом на S02: 16 тестів (5 підтестів), усі проходять.
 
-## MCP-сервер (S03)
+## MCP Server (S03)
 
 `mcp_server.py` — транспортний шар над `tools_legacy.py`/`knowledge.py`
 через офіційний MCP SDK (`mcp.server.fastmcp.FastMCP`, stdio entry point;
@@ -101,7 +101,7 @@ python -m pytest tests/ -v
   виклик має `isError=False`, невалідний — `isError=True` з описом
   причини, storage не змінюється.
 
-### Запуск сервера
+### Running the Server
 
 ```bash
 python mcp_server.py
@@ -109,7 +109,7 @@ python mcp_server.py
 
 Для ручної перевірки: `npx @modelcontextprotocol/inspector python mcp_server.py`.
 
-## MCP-тести (S04)
+## MCP Tests (S04)
 
 `tests/test_mcp_server.py` — 13 async-тестів через справжній MCP client
 API (`mcp.ClientSession` + `mcp.client.stdio.stdio_client`), а не прямі
@@ -134,7 +134,7 @@ python -m pytest tests/test_mcp_server.py -v  # лише MCP
 
 Станом на S04: 29 тестів (5 підтестів), усі проходять.
 
-## MAS у LangGraph (S05)
+## MAS in LangGraph (S05)
 
 `mas_langgraph.py` — supervisor-вузол маршрутизує запит між чотирма
 спеціалізованими агентами. Локальні валідовані wrappers з `tools_legacy.py`
@@ -186,7 +186,7 @@ python -m pytest tests/test_mas_langgraph.py -v   # локальні wrappers, �
 
 Станом на S05: 42 тести (5 підтестів), усі проходять.
 
-## Підключення MCP до агентів (S06)
+## MCP Integration with Agents (S06)
 
 `MASApp.connect_mcp()` піднімає `mcp_server.py` (S03) як окремий subprocess
 через `MultiServerMCPClient` (stdio, абсолютний шлях до файлу сервера,
@@ -238,11 +238,73 @@ gitignored `runtime/` (не контрольний артефакт здачі �
 Станом на S06: 49 тестів (5 підтестів), усі проходять; 5 з них (`test_mas_mcp_integration.py`)
 реально піднімають subprocess MCP-сервера.
 
-## Статус
+## Durable State (S07)
 
-Виконано: S01–S05 (репозиторій, перевикористані компоненти, MCP-сервер і
-тести, LangGraph supervisor з агентами billing/tech/researcher/general),
-S06 (підключення MCP до агентів: єдиний dispatcher, реальні tool/resource/
-prompt виклики через subprocess). Наступний крок — S07 (durable state:
-SqliteSaver, persistence demo, приймання базового рівня) за планом
+MAS зберігає стан через файловий `AsyncSqliteSaver` (`langgraph.checkpoint.sqlite.aio`
+— граф викликається через `ainvoke`, а синхронний `SqliteSaver` явно не
+підтримує async-методи) з `thread_id` на кожну сесію. `MASApp(checkpointer=...,
+interrupt_after=[...])` — той самий граф, що й у S05/S06, лише з двома новими
+опційними параметрами.
+
+`persistence_demo.py` — відтворювана демонстрація рівно того, що вимагає
+план: два ОКРЕМІ Python-процеси (не два виклики в одному інтерпретаторі):
+
+```bash
+python persistence_demo.py pause    # процес А: 1 крок (маршрутизація), пауза, закриття з'єднання
+python persistence_demo.py resume   # процес Б: нове з'єднання, той самий thread_id, довиконання
+```
+
+- **Процес А**: `interrupt_after=["supervisor"]` зупиняє граф одразу після
+  ОДНОГО виконаного кроку — ще до того, як billing реально викличе tool;
+  знімок стану (`plan=[]`, `current_step=0`, `results=[]`) підтверджує це.
+- **Процес Б**: нове з'єднання до того самого `agent_state.db` і
+  `thread_id`, `resume()` (`None` як вхід — стандартний спосіб LangGraph
+  продовжити з checkpoint) доводить billing до кінця. Порівняння
+  `plan`/`current_step`/`results` до і після: `current_step: 0 -> 2`,
+  `results` містить РІВНО стільки записів, скільки кроків у плані (не
+  вдвічі більше) — доводить відсутність повторного виконання вже
+  зробленого кроку.
+- **Ізоляція сесій**: інший `thread_id` (`persistence-demo-isolated`) не
+  бачить жодного стану першого — перевірено в обох процесах.
+- **Цілісність SQLite без WAL**: `SqliteSaver`/`AsyncSqliteSaver` вмикають
+  `PRAGMA journal_mode=WAL`, тому свіжі записи спершу лежать в окремому
+  `-wal` файлі. Після фази `resume` виконується
+  `PRAGMA wal_checkpoint(TRUNCATE)` + повернення в `journal_mode=DELETE`
+  — доставлений `agent_state.db` самодостатній, без потреби у
+  supplementary `-wal`/`-shm` файлах (перевірено: `PRAGMA integrity_check`
+  → `ok`, sidecar-файли відсутні).
+- `trajectory.json` (контрольний артефакт) об'єднує обидві фази; кожен
+  крок має `agent_name`.
+
+```bash
+python -m pytest tests/test_persistence.py -v
+```
+
+5 тестів — кожен реально запускає `persistence_demo.py pause`/`resume` як
+окремий `subprocess.run([sys.executable, ...])` (не прямий виклик функцій
+у тому самому інтерпретаторі), з ізольованими шляхами через
+`PERSISTENCE_DB_PATH`/`PERSISTENCE_KNOWLEDGE_PATH`/`PERSISTENCE_TRAJECTORY_PATH`/
+`PERSISTENCE_RUNTIME_DIR` — жоден тест не чіпає справжні контрольні
+артефакти в корені.
+
+Станом на S07: 54 тести (5 підтестів), усі проходять.
+
+## Base-Level Control Artifacts
+
+`agent_state.db`, `chroma_db/`, `trajectory.json` у корені репозиторію —
+контрольні артефакти здачі базового рівня (синтетичний billing-запит,
+demo-режим, без реальних секретів чи персональних даних), згенеровані
+`persistence_demo.py` і після цього заморожені (writers закрито,
+`agent_state.db` явно checkpoint'нуто — без залежності від WAL). Звичайні
+runtime-сесії розробки (S05/S06 demo-прогони) ізольовано в gitignored
+`runtime/` і в артефакти здачі не потрапляють.
+
+## Status
+
+Виконано: S01–S06 (репозиторій, перевикористані компоненти, MCP-сервер і
+тести, LangGraph supervisor з агентами billing/tech/researcher/general,
+підключення MCP до агентів), S07 (durable state: файловий SqliteSaver,
+pause/resume між процесами, ізоляція сесій, контрольні артефакти здачі
+базового рівня). Це завершує базовий рівень (до 65 балів). Наступний
+крок — S08 (guardrails: input/output/tool/rate-limit) за планом
 `claude_plan/`.

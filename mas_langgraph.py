@@ -736,11 +736,23 @@ class GeneralAgent:
 
 
 class MASApp:
-    def __init__(self, provider: Literal["demo", "gemini"] = "demo", run_id: str = "mas-run"):
+    def __init__(
+        self,
+        provider: Literal["demo", "gemini"] = "demo",
+        run_id: str = "mas-run",
+        checkpointer: Any = None,
+        interrupt_after: list[str] | None = None,
+    ):
         self.provider = provider
         self.logger = TrajectoryLogger(run_id)
         self.llm: Any = None
         self.mcp_client: Any = None
+        # checkpointer/interrupt_after — durable state (S07). Без checkpointer
+        # (типовий випадок для S01–S06 і більшості тестів) граф поводиться як
+        # раніше: без збереження стану між викликами. З файловим SqliteSaver
+        # (persistence_demo.py) той самий граф переживає перезапуск процесу.
+        self.checkpointer = checkpointer
+        self.interrupt_after = interrupt_after
         # Локальні LangChain-обгортки за замовчуванням; connect_mcp() (S06)
         # ОНОВЛЮЄ цей самий словник in-place MCP-tools з тими самими іменами
         # — агенти тримають лише bound-метод dispatch_tool, тому підміна
@@ -893,7 +905,7 @@ class MASApp:
         graph.add_edge("tech", "supervisor")
         graph.add_edge("researcher", "supervisor")
         graph.add_edge("general", "supervisor")
-        return graph.compile()
+        return graph.compile(checkpointer=self.checkpointer, interrupt_after=self.interrupt_after)
 
     def _node(self, _name: str, fn: Any) -> Any:
         """Обгортка: додає до `update["trajectory"]` лише нові кроки, залишені
@@ -996,6 +1008,7 @@ class MASApp:
         return {
             "completed": True,
             "plan": plan,
+            "current_step": len(results),  # відображає прогрес billing у зовнішньому стані (S07: порівняння до/після)
             "results": results,
             "messages": [AIMessage(content=answer)],
             "handoff_context": None,
@@ -1035,8 +1048,9 @@ class MASApp:
 
     # -- публічний вхід --------------------------------------------------------
 
-    async def handle_query(self, query: str, thread_id: str = "demo") -> dict[str, Any]:
-        initial_state: MASState = {
+    @staticmethod
+    def initial_state(query: str, thread_id: str = "demo") -> MASState:
+        return {
             "messages": [HumanMessage(content=query)],
             "current_agent": "general",
             "plan": [],
@@ -1051,7 +1065,36 @@ class MASApp:
             "handoff_context": None,
             "handoff_count": 0,
         }
-        return await self.app.ainvoke(initial_state)
+
+    @staticmethod
+    def config(thread_id: str) -> dict[str, dict[str, str]]:
+        return {"configurable": {"thread_id": thread_id}}
+
+    async def handle_query(self, query: str, thread_id: str = "demo") -> dict[str, Any]:
+        return await self.app.ainvoke(self.initial_state(query, thread_id), config=self.config(thread_id))
+
+    async def resume(self, thread_id: str) -> dict[str, Any]:
+        """Продовжити граф із checkpoint, збереженого для `thread_id` (S07).
+
+        `None` як вхід — стандартний спосіб LangGraph "продовжити з останнього
+        checkpoint" (потребує підключеного `checkpointer`); працює однаково,
+        викликаний з того самого процесу чи з нового (checkpointer читає стан
+        із файлу, а не з пам'яті поточного об'єкта).
+        """
+        if self.checkpointer is None:
+            raise ValueError("resume() потребує MASApp(checkpointer=...) — durable state не увімкнено.")
+        return await self.app.ainvoke(None, config=self.config(thread_id))
+
+    async def get_snapshot(self, thread_id: str) -> dict[str, Any]:
+        """Знімок поточного checkpoint-стану для `thread_id` (без виконання
+        графа) — для порівняння plan/current_step/results до і після
+        паузи/відновлення. Async — `AsyncSqliteSaver` не підтримує sync
+        `get_state()` (симетрично до того, що синхронний `SqliteSaver` не
+        підтримує `ainvoke`)."""
+        if self.checkpointer is None:
+            raise ValueError("get_snapshot() потребує MASApp(checkpointer=...).")
+        snapshot = await self.app.aget_state(self.config(thread_id))
+        return dict(snapshot.values) if snapshot else {}
 
 
 async def _run_demo() -> None:
