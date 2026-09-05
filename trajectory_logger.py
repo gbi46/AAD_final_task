@@ -12,7 +12,10 @@
 - ліміт довжини поля збільшено з 500 до `max_field_chars` (типово 4000) —
   попередній жорсткий поріг 500 символів фактично підміняв повний крок
   урізаним резюме; кроки й далі обмежені (проти патологічного розміру), але
-  залишаються придатними для audit/evals/red-team на наступних рівнях.
+  залишаються придатними для audit/evals/red-team на наступних рівнях;
+- (S08) `_redact_text` додатково пропускає значення через `output_guardrail`
+  з `guardrails.py` — маскує PII (email/телефон/картка/IBAN/ІПН) у
+  експортованому trajectory.json, не лише API-ключі.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from guardrails import output_guardrail
 
 _SENSITIVE_PATTERNS = [
     re.compile(r"AIza[0-9A-Za-z_\-]{35}"),
@@ -38,6 +42,7 @@ def _redact_text(value: str) -> str:
     redacted = value
     for pattern in _SENSITIVE_PATTERNS:
         redacted = pattern.sub(_REDACTED, redacted)
+    redacted, _pii_found = output_guardrail(redacted)  # S08: PII, не лише API-ключі
     return redacted
 
 

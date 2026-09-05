@@ -42,6 +42,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
+from guardrails import RateLimiter, input_guardrail, output_guardrail, tool_guardrail
 from safety import ExecutionGuard, SafetyStop, call_with_timeout
 from tools_legacy import TOOLS_BY_NAME
 from trajectory_logger import TrajectoryLogger
@@ -742,6 +743,7 @@ class MASApp:
         run_id: str = "mas-run",
         checkpointer: Any = None,
         interrupt_after: list[str] | None = None,
+        rate_limiter: RateLimiter | None = None,
     ):
         self.provider = provider
         self.logger = TrajectoryLogger(run_id)
@@ -753,6 +755,10 @@ class MASApp:
         # (persistence_demo.py) той самий граф переживає перезапуск процесу.
         self.checkpointer = checkpointer
         self.interrupt_after = interrupt_after
+        # ОДИН екземпляр на весь MASApp (S08): rolling window не обнуляється
+        # на кожен вузол графа — перевіряється рівно один раз на вхід запиту,
+        # у handle_query. Тести підставляють rate_limiter із фейковим clock.
+        self.rate_limiter = rate_limiter or RateLimiter()
         # Локальні LangChain-обгортки за замовчуванням; connect_mcp() (S06)
         # ОНОВЛЮЄ цей самий словник in-place MCP-tools з тими самими іменами
         # — агенти тримають лише bound-метод dispatch_tool, тому підміна
@@ -835,19 +841,30 @@ class MASApp:
     async def dispatch_tool(self, name: str, arguments: dict[str, Any], agent_name: str) -> str:
         """ЄДИНА точка виклику будь-якого tool з будь-якого агента (billing/
         tech/researcher) — локального чи MCP-tool з `self.tools_by_name`.
-        Сюди S08 додасть guardrail-політики (allowlist per agent, rate-limit).
+
+        Guardrail-політики (S08), у порядку застосування:
+        1. `tool_guardrail(agent_name, name)` — allowlist per agent,
+           перевіряється ПЕРЕД будь-яким local/MCP викликом. `agent_name`
+           надходить з контрольованого execution context (кожен агент
+           передає власне ім'я явно), а не з фрази користувача.
+        2. Виконання tool (local wrapper чи MCP).
+        3. `input_guardrail` на результат — tool/MCP resource/RAG повертають
+           недовірений зовнішній текст, який далі потрапляє у контекст LLM
+           (напр. billing/tech передають попередні `results` у наступний
+           LLM-виклик); підозрілий вміст блокується так само, як вхід
+           користувача.
 
         Записує tool_call_id, аргументи, тривалість і agent_name у спільний
-        TrajectoryLogger — і для успіху, і для помилки. Збій (невідомий tool,
-        падіння MCP-сервера) підіймається як `ToolDispatchError`, а НЕ
-        повертається як фальшивий успішний рядок.
+        TrajectoryLogger — і для успіху, і для помилки. Збій (заборонено
+        guardrail, невідомий tool, падіння MCP-сервера, підозрілий вміст
+        результату) підіймається як `ToolDispatchError`, а НЕ повертається
+        як фальшивий успішний рядок.
         """
-        tool = self.tools_by_name.get(name)
         tool_call_id = str(uuid.uuid4())
         started = time.monotonic()
-        if tool is None:
+
+        def _deny(message: str) -> None:
             duration_ms = int((time.monotonic() - started) * 1000)
-            message = f"Невідомий інструмент: {name}."
             self.logger.log(
                 "tool_dispatch_error",
                 {"tool_call_id": tool_call_id, "name": name, "args": arguments},
@@ -857,6 +874,14 @@ class MASApp:
                 agent_name=agent_name,
             )
             raise ToolDispatchError(message)
+
+        if not tool_guardrail(agent_name, name):
+            _deny(f"Guardrail: агенту '{agent_name}' заборонено викликати tool '{name}'.")
+
+        tool = self.tools_by_name.get(name)
+        if tool is None:
+            _deny(f"Невідомий інструмент: {name}.")
+
         try:
             if hasattr(tool, "ainvoke"):
                 raw_result = await tool.ainvoke(arguments)
@@ -864,27 +889,23 @@ class MASApp:
                 raw_result = tool.invoke(arguments)
             result = _stringify_tool_result(raw_result)
         except Exception as exc:  # збій transport/сервера чи бізнес-логіки — не ковтаємо мовчки
-            duration_ms = int((time.monotonic() - started) * 1000)
-            message = f"Tool {name} завершився помилкою: {exc}"
-            self.logger.log(
-                "tool_dispatch_error",
-                {"tool_call_id": tool_call_id, "name": name, "args": arguments},
-                message,
-                tool_calls=[{"name": name, "args": arguments, "id": tool_call_id}],
-                duration_ms=duration_ms,
-                agent_name=agent_name,
-            )
-            raise ToolDispatchError(message) from exc
+            _deny(f"Tool {name} завершився помилкою: {exc}")
+
+        is_safe, sanitized_or_error = input_guardrail(result, max_len=20_000)
+        if not is_safe:
+            _deny(f"Guardrail: результат tool '{name}' заблоковано — {sanitized_or_error}")
+        result = sanitized_or_error
+
         duration_ms = int((time.monotonic() - started) * 1000)
         self.logger.log(
             "tool_dispatch",
             {"tool_call_id": tool_call_id, "name": name, "args": arguments},
-            str(result),
+            result,
             tool_calls=[{"name": name, "args": arguments, "id": tool_call_id}],
             duration_ms=duration_ms,
             agent_name=agent_name,
         )
-        return str(result)
+        return result
 
     # -- побудова зовнішнього графа ------------------------------------------
 
@@ -910,7 +931,9 @@ class MASApp:
     def _node(self, _name: str, fn: Any) -> Any:
         """Обгортка: додає до `update["trajectory"]` лише нові кроки, залишені
         цим викликом у спільному self.logger — без дублювання (reducer вище
-        додатково підстраховує ідемпотентність при повторних візитах).
+        додатково підстраховує ідемпотентність при повторних візитах). Також
+        маскує PII у `results`/`messages` через `output_guardrail` (S08) —
+        ОДНЕ місце для всіх agent-вузлів, а не окремий виклик у кожному.
 
         `fn` може бути sync (supervisor/general без MCP) або async (billing/
         tech/researcher — викликають dispatch_tool); LangGraph підтримує
@@ -922,6 +945,7 @@ class MASApp:
             async def wrapped_async(state: MASState) -> dict[str, Any]:
                 before = len(self.logger.steps)
                 update = await fn(state)
+                update = self._apply_output_guardrail(update)
                 delta = self.logger.steps[before:]
                 if delta:
                     update = {**update, "trajectory": delta}
@@ -932,12 +956,28 @@ class MASApp:
         def wrapped_sync(state: MASState) -> dict[str, Any]:
             before = len(self.logger.steps)
             update = fn(state)
+            update = self._apply_output_guardrail(update)
             delta = self.logger.steps[before:]
             if delta:
                 update = {**update, "trajectory": delta}
             return update
 
         return wrapped_sync
+
+    @staticmethod
+    def _apply_output_guardrail(update: dict[str, Any]) -> dict[str, Any]:
+        """Маскує PII (email/телефон/картка/IBAN/ІПН) у `results`/`messages`
+        ПЕРЕД поверненням у стан — S08, застосовується до кожного agent-вузла.
+        """
+        if update.get("results"):
+            update = {**update, "results": [output_guardrail(item)[0] for item in update["results"]]}
+        if update.get("messages"):
+            redacted_messages = []
+            for message in update["messages"]:
+                redacted_content, _pii_found = output_guardrail(_message_text(message))
+                redacted_messages.append(message.model_copy(update={"content": redacted_content}))
+            update = {**update, "messages": redacted_messages}
+        return update
 
     @staticmethod
     def _user_goal(state: MASState) -> str:
@@ -1071,7 +1111,30 @@ class MASApp:
         return {"configurable": {"thread_id": thread_id}}
 
     async def handle_query(self, query: str, thread_id: str = "demo") -> dict[str, Any]:
-        return await self.app.ainvoke(self.initial_state(query, thread_id), config=self.config(thread_id))
+        """Вхід у MAS (S08): rate-limit і input guardrail перевіряються ТУТ,
+        ДО побудови стану й виклику графа — заблокований запит жодного
+        вузла/tool не торкається (не лише повертає "безпечну" відповідь
+        post-hoc). `thread_id` використовується і як `session_id` для
+        rate-limit (одна сесія — один потік розмови).
+        """
+        allowed, rate_message = self.rate_limiter.check(thread_id)
+        if not allowed:
+            return self._blocked_state(query, thread_id, "rate_limit_guardrail", rate_message)
+
+        is_safe, sanitized_or_error = input_guardrail(query)
+        if not is_safe:
+            return self._blocked_state(query, thread_id, "input_guardrail", sanitized_or_error)
+
+        return await self.app.ainvoke(self.initial_state(sanitized_or_error, thread_id), config=self.config(thread_id))
+
+    def _blocked_state(self, query: str, thread_id: str, guardrail_name: str, message: str) -> MASState:
+        self.logger.log(guardrail_name, query, message, agent_name="supervisor")
+        blocked_answer = f"Запит заблоковано ({guardrail_name}): {message}"
+        state = self.initial_state(query, thread_id)
+        state["completed"] = True
+        state["results"] = [blocked_answer]
+        state["messages"] = [*state["messages"], AIMessage(content=blocked_answer)]
+        return state
 
     async def resume(self, thread_id: str) -> dict[str, Any]:
         """Продовжити граф із checkpoint, збереженого для `thread_id` (S07).
