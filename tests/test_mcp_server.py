@@ -1,23 +1,4 @@
-"""Async-тести MCP-примітивів через повний stdio-протокол (S04).
-
-На відміну від `tests/test_tools.py` (прямі виклики Python-функцій), тут
-використовується справжній MCP client API — `mcp.ClientSession` поверх
-`mcp.client.stdio.stdio_client`, що запускає `mcp_server.py` як окремий
-subprocess. Так перевіряється і transport-шар (list_tools/call_tool/
-list_resources/read_resource/list_prompts/get_prompt, isError-семантика),
-і бізнес-логіка одночасно — не лише прямий виклик Python-функції.
-
-Жоден тест не потребує LLM API-ключа: MCP-сервер сам по собі не викликає
-жодної LLM, лише детерміновану бізнес-логіку з tools_legacy.py/knowledge.py.
-
-Сесія відкривається окремим `async with` у КОЖНОМУ тесті (а не через
-async-generator fixture): nested `stdio_client`+`ClientSession` під
-pytest-asyncio async-fixture ламає anyio cancel scope на teardown
-("Attempted to exit cancel scope in a different task than it was entered
-in") — той самий код інлайн у тілі тесту працює коректно, бо весь
-контекстний менеджер живе в одному task. Ізоляція сховища — через
-вбудований pytest-фікстур `tmp_path` (окремий tempdir на кожен тест).
-"""
+"""Перевірки mcp server."""
 
 from __future__ import annotations
 

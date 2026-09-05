@@ -1,11 +1,4 @@
-"""Інтеграція guardrails у MAS execution path (S08).
-
-На відміну від `test_guardrails.py` (guardrails.py ізольовано), тут
-перевіряється, що блокування реально відбувається ВСЕРЕДИНІ
-`MASApp.handle_query`/`dispatch_tool` — заборонений tool не викликається,
-storage не змінюється, а не лише що функція `guardrails.py` сама по собі
-повертає правильний булевий результат.
-"""
+"""Перевірки mas guardrails."""
 
 from __future__ import annotations
 
@@ -123,7 +116,7 @@ class ToolGuardrailIntegrationTests(unittest.IsolatedAsyncioTestCase):
         """Позитивний контроль: billing МАЄ право на book_hotel (allowlist
         не заважає легітимному виклику) — сам виклик тут прямий, а не через
         звичайний MAS-потік (book_hotel не входить у billing-планувальник
-        до S09/HITL), лише перевірка allowlist на рівні dispatch_tool.
+        до /HITL), лише перевірка allowlist на рівні dispatch_tool.
         """
         args = {"hotel_name": "Hotel Lumiere", "check_in": "2026-09-15", "nights": 2, "total_cost": 280}
         result = await self.mas.dispatch_tool("book_hotel", args, "billing")

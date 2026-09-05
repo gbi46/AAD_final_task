@@ -1,5 +1,5 @@
 {
-  "source": "knowledge.py KNOWLEDGE_DOCUMENTS (reference snapshot, S16)",
+  "source": "knowledge.py KNOWLEDGE_DOCUMENTS (reference snapshot)",
   "documents": [
     {
       "id": "travel-01",

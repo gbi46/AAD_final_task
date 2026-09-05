@@ -1,20 +1,4 @@
-"""Тести mas_crewai.py (S14, Bonus Level).
-
-ВАЖЛИВО: цей файл запускається під ОКРЕМИМ venv (`.venv-crewai/`), НЕ під
-основним `.venv/` -- `crewai`/`crewai-tools` мають pinned-версії, що
-конфліктують з основним `requirements.txt` (S14, `mas_crewai.py` docstring).
-Тому він НЕ входить у звичайний `python -m pytest tests/` (основний venv
-навіть не має `crewai` встановленим) -- запускати окремо:
-
-    .venv-crewai/bin/python -m pytest tests/test_mas_crewai.py -v
-
-Тести без `RUN_LIVE_CREWAI=1` перевіряють лише те, що НЕ вимагає живого
-LLM-виклику (реальне MCP-підключення й фільтрація tools — це не вимагає
-LLM, лише субпроцес). Один live-тест (реальний `run_query()` через
-OpenRouter) вимкнено за замовчуванням -- явно дорогий (реальні токени) і
-повільний (~30-90с через delegation); вмикається `RUN_LIVE_CREWAI=1` +
-робочий `OPENROUTER_API_KEY`.
-"""
+"""Перевірки mas crewai."""
 
 from __future__ import annotations
 
@@ -30,12 +14,12 @@ import mas_crewai as mc
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-# `crewai` не встановлений в основному .venv (навмисно -- конфліктує з
+# `crewai` не встановлений в основному.venv (навмисно -- конфліктує з
 # pinned requirements.txt, див. docstring mas_crewai.py) -- будь-який тест,
 # що реально ІМПОРТУЄ crewai (не лише статичні перевірки allowlist-констант
 # вище modele-рівня), під основним venv має SKIP, а не FAIL, інакше
 # звичайний `pytest tests/` без --ignore ламається для того, хто не знає
-# про окремий .venv-crewai/.
+# про окремий.venv-crewai/.
 _HAS_CREWAI = importlib.util.find_spec("crewai") is not None
 _skip_without_crewai = unittest.skipUnless(
     _HAS_CREWAI, "crewai не встановлено в цьому venv -- запустити під .venv-crewai/bin/python"
@@ -44,7 +28,7 @@ _skip_without_crewai = unittest.skipUnless(
 
 class ToolAllowlistTests(unittest.TestCase):
     """Статичні перевірки allowlist -- book_hotel НЕ має з'явитись у жодному
-    записі (план: "не дати всім агентам привілейований book_hotel")."""
+    записі."""
 
     def test_book_hotel_excluded_from_every_agent(self) -> None:
         for name, tools in (
@@ -65,7 +49,7 @@ class ToolAllowlistTests(unittest.TestCase):
 @_skip_without_crewai
 class MCPConnectionTests(unittest.TestCase):
     """Справжнє MCP-підключення (реальний subprocess mcp_server.py через
-    ГОЛОВНИЙ .venv) -- без LLM, тому швидко й безкоштовно."""
+    ГОЛОВНИЙ.venv) -- без LLM, тому швидко й безкоштовно."""
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -92,7 +76,7 @@ class LLMConfigTests(unittest.TestCase):
     """`crewai.LLM(model="openrouter/...")` валідує наявність (НЕ
     справжність) `OPENROUTER_API_KEY` вже при самій побудові об'єкта — без
     жодного ключа падає `pydantic.ValidationError` ще до будь-якого
-    мережевого виклику (виявлено емпірично, S16: тести падали в чистому
+    мережевого виклику (виявлено емпірично,: тести падали в чистому
     checkout без `.env`, хоча в дев-середовищі з реальним ключем
     проходили мовчки). Тому кожен тест тут підставляє ФІКТИВНИЙ рядок
     (не справжній секрет, жодного виклику мережі не відбувається) --
@@ -126,7 +110,7 @@ class LLMConfigTests(unittest.TestCase):
                     os.environ[key] = value
 
     def test_build_llm_default_max_tokens_avoids_the_65536_credit_error(self) -> None:
-        """Регресія на баг, знайдений живим прогоном S14: OpenRouter/CrewAI
+        """Регресія на баг, знайдений живим прогоном: OpenRouter/CrewAI
         за замовчуванням підставляють max_tokens=65536, що перевищує баланс
         тестового ключа (402 'requires more credits')."""
         old_max = os.environ.pop("OPENROUTER_MAX_TOKENS", None)
@@ -146,7 +130,7 @@ class LLMConfigTests(unittest.TestCase):
 )
 class LiveCrewRunTests(unittest.TestCase):
     """Опційний живий прогін -- підтверджує ≥3 спеціалісти + фактичний MCP
-    call (план S14), не запускається в звичайному прогоні тестів."""
+    call , не запускається в звичайному прогоні тестів."""
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -155,12 +139,12 @@ class LiveCrewRunTests(unittest.TestCase):
     def test_billing_query_triggers_real_calculate_trip_cost(self) -> None:
         """Перевіряє лише, що запит успішно проходить крізь delegation і
         повертає змістовну відповідь про Львів. НЕ перевіряє точний збіг
-        числа ("312 EUR") у фінальному тексті: емпірично виявлено (S14),
+        числа ("312 EUR") у фінальному тексті: емпірично виявлено,
         що coordinator у CrewAI ПЕРЕФОРМУЛЬОВУЄ делеговану відповідь billing-
         агента власними словами (часто переводить у грн і заокруглює), а не
         передає точний рядок tool-результату так, як це робить LangGraph
-        `results` (S05, `operator.add` reducer над точними рядками кроків).
-        Це задокументована відмінність для S15 (fidelity/precision), не
+        `results` (, `operator.add` reducer над точними рядками кроків).
+        Це задокументована відмінність для (fidelity/precision), не
         баг цього тесту.
         """
         result = mc.run_query(

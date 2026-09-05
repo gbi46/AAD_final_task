@@ -1,46 +1,8 @@
-"""Scenario-based evals (S11): ≥5 фіксованих сценаріїв через СПРАВЖНІЙ
-MAS-граф (`MASApp.handle_query`/`Command(resume=...)`), не unit-тести
-окремих вузлів — кожен сценарій перевіряє РЕЗУЛЬТУЮЧУ траєкторію/стан
-(`state["trajectory"]`, `state["results"]`, `state["current_agent"]`), а не
-захардкожену відповідь. Очікування (assertion-функція нижче) явно
-відокремлені від фактичного спостереження (`observed`), як вимагає план.
+"""Оцінювання MAS: simple, multi-step, RAG, handoff і HITL-сценарії.
 
-Перевикористання: EVAL-05 (HITL) — той самий approve-сценарій і той самий
-інтерфейс (`MASApp(checkpointer=...)`, `interrupt()`/`Command(resume=...)`),
-що й `hitl.py run_scenario("approve")` (S09), тут лише обгорнутий у
-формальний assert замість `print()`. Інші 4 сценарії використовують ту саму
-точку входу `MASApp.handle_query`, що й `observability.py` (S10) — без
-дублювання парсингу запиту чи маршрутизації.
-
-Режим (`--mode demo`, за замовчуванням) — детермінований: `DemoSupervisorRouter`/
-`DemoBillingPlanner`/`DemoTechDecisionModel`/`DemoResearcherDecisionModel`
-проходять ТОЙ САМИЙ граф, що й live LLM (маршрутизація верифікована емпірично
-в S05–S10), але без мережевого виклику чи вартості — це основний режим
-приймання (не залежить від live-квоти). `--mode live` (provider="openrouter")
-доступний для реальної LLM-перевірки того самого набору сценаріїв; `mode`
-записується в кожен запис результату, і demo/live НІКОЛИ не змішуються
-всередині одного прогону — кожен виклик `evals.py` повністю перезаписує
-`eval_results.json` результатами ОДНОГО режиму (не додає до попереднього).
-
-Один сценарій = одна нова сесія: свіжий `MASApp` (rate_limiter/guards з нуля,
-власний `run_id`), унікальний `thread_id`, і **скинуте сховище** —
-`runtime/evals/` видаляється і перестворюється на початку кожного прогону
-`main()`, а не лишається спільним між сценаріями чи прогонами.
-
-`trace_id` навмисно `null` для КОЖНОГО запису: емпірично перевірено (S11),
-що обгортання виклику в `langchain_core.tracers.context.collect_runs()` (щоб
-дістати id кореневого run) ЛОМАЄ вкладеність трейсу — вкладені підграфи
-(tech/billing) й tool-виклики спливають ОКРЕМИМИ root-трейсами замість
-дітей `LangGraph` (перевірено прямим порівнянням дерева run'ів через
-`langsmith` SDK з і без `collect_runs()`). Оскільки коректна ієрархія
-трейсу важливіша за зручний `trace_id` у цьому файлі (і вже повністю
-покрита окремо в `observability.py`/README S10 — реальні trace links там
-не постраждали, бо S10 НЕ використовує `collect_runs()`), тут свідомо НЕ
-робиться такого зв'язування. Якщо `LANGSMITH_API_KEY` заданий у `.env`,
-кожен сценарій усе одно трасується у той самий LangSmith-проєкт (як
-звичайний побічний ефект глобальних env-змінних) — просто без
-programmatic-посилання з `eval_results.json` на конкретний trace.
-"""
+Режим demo не потребує LLM; live використовує OpenRouter.
+Результати, час, агенти й інструменти записуються в eval_results.json.
+trace_id може бути null: локальний collect_runs не гарантує публікацію trace."""
 
 from __future__ import annotations
 
@@ -257,15 +219,10 @@ EVAL05_EXPECTED = "billing -> interrupt (жодного booking) -> approve -> �
 
 
 async def _run_eval05(provider: str) -> dict[str, Any]:
-    """Окремий прогін (не через `_run_query_scenario`): потребує
-    `checkpointer` для `interrupt()`/`Command(resume=...)`, тому має власний
-    lifecycle (`AsyncSqliteSaver`), як `hitl.py run_scenario("approve")`.
-    latency_ms і human_wait_ms виміряні ОКРЕМО (план: "для HITL відокремити
-    очікування людини") — тут рішення надходить одразу (скриптований
-    approve для відтворюваного eval, не справжнє очікування людини), тому
-    human_wait_ms відображає реальний (малий) час між зупинкою графа і
-    resume, а не вигадане число.
-    """
+    """Перевірити HITL з файловим checkpoint і скриптованим approve.
+
+    latency_ms вимірює виконання графа, human_wait_ms — проміжок між
+    interrupt і resume; рішення в цьому сценарії надходить автоматично."""
     import mas_langgraph as m
 
     thread_id = "eval-05"
@@ -409,10 +366,7 @@ async def _run_all(mode: str) -> list[EvalRecord]:
 
 
 def _reset_runtime() -> None:
-    """Скинуті fixtures ПЕРЕД усім прогоном (план: "Один кейс = нова session
-    і скинуті fixtures") — увесь `runtime/evals/` перестворюється, а не
-    лишається з попереднього виклику `evals.py`.
-    """
+    """Перестворити runtime/evals і скинути fixtures перед оцінюванням."""
     if _RUNTIME_DIR.exists():
         shutil.rmtree(_RUNTIME_DIR)
     _RUNTIME_DIR.mkdir(parents=True, exist_ok=True)

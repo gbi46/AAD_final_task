@@ -1,8 +1,4 @@
-"""Тести розширеного TrajectoryLogger: agent_name, санітизація, повнота кроків.
-
-Новий тестовий файл (у ДЗ1 подібного модульного тесту не було — trajectory_logger
-перевірявся лише опосередковано через agent.py). Перевіряє саме зміни S02.
-"""
+"""Перевірки trajectory logger."""
 
 from __future__ import annotations
 

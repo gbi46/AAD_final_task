@@ -1,9 +1,4 @@
-"""Перевірки локальної бази знань.
-
-Перенесено без змін з `Kravchuk_AAD_2/tests/test_knowledge.py`: 10
-документів у колекції, пошук повертає до трьох релевантних. Кожен тест
-створює власну tempdir-колекцію ChromaDB.
-"""
+"""Перевірки knowledge."""
 
 from __future__ import annotations
 

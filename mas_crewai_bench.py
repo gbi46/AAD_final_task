@@ -1,16 +1,4 @@
-"""CLI-обгортка над `mas_crewai.run_query_with_metrics` для S15 (Fair
-Comparison) — запускається під `.venv-crewai` як SUBPROCESS з
-`compare_frameworks.py` (який сам живе під основним `.venv`, де `crewai`
-не встановлено). Друкує РІВНО один JSON-рядок у stdout (single line, без
-pretty-print) — так `compare_frameworks.py` може розпарсити результат, не
-плутаючи його з verbose Rich-виводом CrewAI (той іде звичайним
-`print`/консольним рендером, це не заважає останньому рядку stdout).
-
-`agents_used`/`tools_called` збираються через СПРАВЖНІЙ event bus
-CrewAI (`crewai.events.crewai_event_bus`, `ToolUsageStartedEvent`) — не
-regex по verbose-логах: подія несе структуроване `tool_name`/`agent_role`
-для кожного РЕАЛЬНОГО виклику tool (перевірено емпірично, S15).
-"""
+"""CLI для вимірювання CrewAI: час, токени та події агентів і MCP-tools."""
 
 from __future__ import annotations
 

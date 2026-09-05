@@ -1,22 +1,20 @@
-# Віртуальне середовище та кеші Python
+# Python environments and caches
 .venv/
-# S14: crewai має несумісні pinned-версії з основним requirements.txt
-# (понижує chromadb/mcp/pydantic) -- окремий ізольований venv, той самий
-# підхід, що й основний .venv (S01), лише не той самий каталог.
 .venv-crewai/
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
 
-# Секрети — реальний файл ключів ніколи не комітиться, лише .env.example
+# Local configuration and runtime data
 .env
-
-# Локальні runtime-сесії розробки (не контрольні артефакти здачі —
-# agent_state.db, chroma_db/, trajectory.json з кореня репозиторію
-# навмисно НЕ ігноруються, це обов'язкові артефакти здачі)
+.env.*
+!.env.example
 runtime/
-
+*.db-wal
+*.db-shm
+*.sqlite3-wal
+*.sqlite3-shm
 .DS_Store

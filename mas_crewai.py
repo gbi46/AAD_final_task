@@ -1,61 +1,9 @@
-"""Еквівалентна MAS у CrewAI (S14, Bonus Level, `claude_plan/05_BONUS.md`).
+"""Туристична MAS у CrewAI з hierarchical coordinator і трьома спеціалістами.
 
-Той самий домен/кейс, що й `mas_langgraph.py` (S05+): billing (бюджет),
-tech (погода/активності), researcher (туристичні правила/FAQ через RAG),
-з coordinator-вузлом, що маршрутизує запит. Підключено до ТОГО САМОГО
-`mcp_server.py` через СПРАВЖНІЙ MCP stdio subprocess
-(`crewai_tools.MCPServerAdapter`) — план прямо вимагає це: "самі локальні
-wrappers без MCP не задовольняють вимогу" (перевірено, що
-`AAD_practical_task-2/mas_crewai.py`, попередній довідковий приклад, якраз
-використовує локальні Python-обгортки, а не MCP-протокол — тому НЕ
-відтворено тут, лише роль/архітектура запозичена).
-
-Архітектура: hierarchical crew (`Process.hierarchical`) — coordinator
-(`manager_agent`) делегує billing/tech/researcher-спеціалістам; це
-структурний еквівалент `mas_langgraph.py`'s supervisor + 3 спеціалізовані
-агенти (`general` тут не потрібен — план прямо каже "трьома тими самими
-спеціалістами billing, tech, researcher і coordinator").
-
-Per-agent tool permissions (план: "не дати всім агентам привілейований
-book_hotel через спільний MCP список"; порівняй `guardrails.
-TOOL_PERMISSIONS`, S08): КОЖЕН спеціаліст отримує ОКРЕМИЙ
-`MCPServerAdapter(params, *allowed_tool_names)` — сам адаптер фільтрує
-список tools за іменами (перевірено емпірично: `MCPServerAdapter(params,
-"get_weather", "find_activities").tools` повертає РІВНО ці два tools, не
-всі п'ять — див. `codex_review/evidence/` S14), тому tech фізично НЕ бачить
-`calculate_trip_cost`/`book_hotel` як опцію виклику, а не лише "заборонено
-post-hoc". `book_hotel` НАВМИСНО не переданий ЖОДНОМУ агенту тут: CrewAI
-(на відміну від LangGraph, S09) не має вбудованого
-`interrupt()`/`Command(resume=...)` для паузи графа під час kickoff, тому
-чесний вибір — узагалі не давати ризиковий tool без реального HITL-
-механізму, а не імітувати підтвердження, якого немає (план: "Ризикові дії
-не запускати непідтвердженими; для порівняння взяти readonly scenarios").
-
-LLM: той самий провайдер/модель, що й `mas_langgraph.py(provider=
-"openrouter")` — LiteLLM-рядок `openrouter/<OPENROUTER_MODEL>` з тим самим
-`OPENROUTER_API_KEY` у `.env`. Важлива відмінність від LangGraph-версії:
-CrewAI не має еквіваленту `provider="demo"` — кожен `Agent` ініціалізує й
-викликає РЕАЛЬНИЙ LLM (навіть побудова `Agent()` без kickoff вимагає
-робочого ключа), тому запуск цього файлу ЗАВЖДИ live, ніколи не
-детермінований stub.
-
-Cycles/errors: `max_iter`/`max_execution_time` на кожному `Agent` — той
-самий намір, що й `ExecutionGuard` у `mas_langgraph.py` (S05), інший API.
-`allow_delegation=False` для billing/tech/researcher —
-лише coordinator делегує (план: "Виконавчим агентам вимкнути непотрібне
-делегування").
-
-Ізольований venv: `crewai`/`crewai-tools` тягнуть pinned-версії, що
-конфліктують з основним `requirements.txt` (понижують chromadb 1.5.9→1.1.1,
-mcp 1.29.1→1.28.1, pydantic 2.13.5→2.12.5 — перевірено `pip install
---dry-run`, S14). Тому `.venv-crewai/` — ОКРЕМИЙ venv лише для цього
-файлу (`.gitignore`, той самий підхід, що й основний `.venv` у S01, інший
-каталог). MCP-СЕРВЕР (`mcp_server.py`) при цьому запускається дочірнім
-процесом через `.venv/bin/python` (основний venv, ті самі pinned версії
-chromadb/mcp, що й уся решта MAS) — `.venv-crewai` містить лише
-CrewAI-клієнта, що говорить MCP-протоколом (сумісний між мінорними
-версіями `mcp`), а не бізнес-логіку сервера.
-"""
+Кожен спеціаліст отримує власний allowlist через MCPServerAdapter.
+Бронювання недоступне: ця реалізація не має HITL і durable persistence.
+Потрібне окреме середовище requirements-crewai.txt; MCP-сервер працює
+через Python основного середовища.venv."""
 
 from __future__ import annotations
 
@@ -66,7 +14,7 @@ from typing import Any
 
 _ROOT = Path(__file__).resolve().parent
 
-# Per-agent allowlist -- дзеркалить guardrails.TOOL_PERMISSIONS (S08) для
+# Per-agent allowlist -- дзеркалить guardrails.TOOL_PERMISSIONS для
 # LangGraph-версії; book_hotel НАВМИСНО відсутній у жодному записі (див.
 # docstring модуля).
 TECH_TOOLS = ("get_weather", "find_activities")
@@ -74,7 +22,7 @@ BILLING_TOOLS = ("calculate_trip_cost", "search_knowledge")
 RESEARCHER_TOOLS = ("search_knowledge",)
 
 _DEFAULT_MODEL_SLUG = "anthropic/claude-sonnet-4.6"
-_MAX_ITER = 6  # той самий порядок величини, що й ExecutionGuard.max_steps (S05)
+_MAX_ITER = 6  # той самий порядок величини, що й ExecutionGuard.max_steps
 # 120 c, не 60: coordinator синхронно чекає на ВСЮ делеговану роботу
 # спеціаліста (кілька tool-раундів через реальний MCP subprocess) --
 # перший live-прогін researcher-сценарію ("Які правила відвідування
@@ -87,26 +35,14 @@ _MAX_EXECUTION_TIME = 120  # секунд на агента -- аналог Exec
 
 
 def _prepare_crewai_storage() -> None:
-    """CrewAI сам пише у ~/.local/share/crewai/... за замовчуванням -- тримати
-    це у runtime/ репозиторію (gitignored), не в $HOME користувача (той
-    самий підхід, що в AAD_practical_task-2/mas_crewai.py)."""
+    """Зберігати локальні дані CrewAI у runtime/crewai_storage."""
     storage_dir = _ROOT / "runtime" / "crewai_storage"
     storage_dir.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("CREWAI_STORAGE_DIR", str(storage_dir))
 
 
 def _build_llm() -> Any:
-    """`LLM(...)`, не голий рядок -- CrewAI/OpenRouter за замовчуванням
-    підставляють дуже високий `max_tokens` (65536), що перевищує баланс
-    тестового ключа (те саме, що й у `mas_langgraph.MASApp._build_llm` для
-    ChatOpenAI/OpenRouter, S05/pre-S10) -- `openai.APIStatusError: 402`
-    без явного ліміту.
-
-    `temperature=0.1` -- те саме значення, що й
-    `mas_langgraph.MASApp._build_llm` (обидва провайдери, gemini й
-    openrouter) -- S15 (fair comparison) прямо вимагає зафіксувати
-    однакову температуру для обох фреймворків, інакше порівняння
-    latency/tokens не чесне."""
+    """Створити OpenRouter LLM з обмеженням токенів і температурою 0,1."""
     from crewai import LLM
 
     slug = os.getenv("OPENROUTER_MODEL", _DEFAULT_MODEL_SLUG)
@@ -115,10 +51,10 @@ def _build_llm() -> Any:
 
 
 def _mcp_server_params(runtime_dir: Path) -> Any:
-    """StdioServerParameters -- команда явно вказує на ГОЛОВНИЙ .venv
-    (не .venv-crewai, у якому запущено сам цей файл): mcp_server.py
+    """StdioServerParameters -- команда явно вказує на ГОЛОВНИЙ.venv
+    (не.venv-crewai, у якому запущено сам цей файл): mcp_server.py
     залежить від chromadb/mcp/pydantic з їхніми ТОЧНИМИ pinned-версіями
-    основного requirements.txt (S01), а не від того, що встановлено для
+    основного requirements.txt, а не від того, що встановлено для
     CrewAI-клієнта."""
     from mcp import StdioServerParameters
 
@@ -140,7 +76,7 @@ def _connected_tools(runtime_dir: Path):
     """Відкриває ТРИ окремі MCP subprocess-и (по одному на спеціаліста,
     кожен зі своїм відфільтрованим списком tools через
     `MCPServerAdapter(params, *tool_names)`) і повертає dict
-    {agent_key: [crewai Tool, ...]}. Усі три вказують на ОДНАКОВІ
+    {agent_key: [crewai Tool,...]}. Усі три вказують на ОДНАКОВІ
     knowledge/booking шляхи (runtime_dir) -- окремі процеси, той самий
     persisted стан.
     """
@@ -259,8 +195,6 @@ def build_crew(runtime_dir: Path | None = None, tools_by_agent: dict[str, list[A
         # researcher) -- тобто явний `agent=coordinator` тут ЛАМАЄ
         # делегування (менеджер бачить лише самого себе як "коворкера" і
         # отримує "Executor is already running" при спробі делегувати).
-        # Виявлено емпірично під час першого live-прогону S14 (codex_review
-        # evidence). Без `agent=` `Process.hierarchical` сам призначає
         # `manager_agent` виконавцем задачі й коректно пропонує ЙОМУ
         # делегувати на `self.agents`.
     )
@@ -286,11 +220,11 @@ def run_query(query: str, runtime_dir: Path | None = None) -> str:
 
 
 def run_query_with_metrics(query: str, runtime_dir: Path | None = None) -> dict[str, Any]:
-    """Те саме, що `run_query`, але для S15 (fair comparison): додатково
+    """Те саме, що `run_query`, але для (fair comparison): додатково
     повертає `usage_metrics` (`crewai.types.usage_metrics.UsageMetrics` ->
     prompt/completion/total tokens) і latency_ms. Окрема функція, а не
     зміна сигнатури `run_query` -- щоб не ламати наявний контракт
-    (S14, `tests/test_mas_crewai.py`)."""
+    (, `tests/test_mas_crewai.py`)."""
     import time
 
     runtime_dir = runtime_dir or (_ROOT / "runtime" / "crewai")
@@ -301,7 +235,7 @@ def run_query_with_metrics(query: str, runtime_dir: Path | None = None) -> dict[
     latency_ms = int((time.monotonic() - started) * 1000)
     usage = output.usage_metrics
     # `usage_metrics` є або `UsageMetrics` (атрибути), або вже `dict`
-    # (спостережено емпірично, S15) -- нормалізуємо обидва випадки.
+    # (спостережено емпірично, ) -- нормалізуємо обидва випадки.
     usage_dict = usage if isinstance(usage, dict) else usage.model_dump()
     return {
         "answer": str(output),

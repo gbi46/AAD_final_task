@@ -1,29 +1,8 @@
-"""Валідовані туристичні інструменти — спільне ядро для MAS-агентів і MCP.
+"""Доменні туристичні інструменти з Pydantic-валідацією.
 
-Об'єднано й адаптовано з двох попередніх домашніх завдань (детальніше — у
-таблиці походження компонентів у README):
-
-- `Kravchuk_AAD_1/domain_tools.py` (ДЗ1, Завд. 1): `get_weather`,
-  `estimate_budget`, `find_activities`, каталог міст CITY_DATA.
-- `Kravchuk_AAD_2/domain_tools.py` (ДЗ2, Завд. 1/3): `calculate_trip_cost`
-  (те саме обчислення, що й `estimate_budget`), `search_knowledge` (Agentic
-  RAG над `knowledge.KnowledgeBase`), `book_hotel` (ризикова дія для HITL).
-
-Каталог міст об'єднано без конфліктів — Київ/Львів/Одеса/Берлін мають
-однакові значення в обох джерелах; додано Варшаву (ДЗ1) і Париж (ДЗ2), бо
-документи `knowledge.py` посилаються саме на Париж і Берлін.
-
-Рівно п'ять публічних MCP-tools (буде підключено в MCP-сервері, S03):
-`get_weather`, `calculate_trip_cost`, `find_activities`, `search_knowledge`,
-`book_hotel`. `convert_currency` з ДЗ1 навмисно не перенесено — він не
-входить у цей список і дублював би поверхню MCP-сервера без потреби.
-
-Кожен tool має тонку LangChain-обгортку (`@tool(args_schema=...)`) над
-"core"-функцією з тією самою бізнес-логікою. MCP-сервер (S03) імпортує й
-викликає ці core-функції та Pydantic-схеми напряму, не залежачи від
-LangChain `BaseTool` — так одна реалізація обслуговує і агентів LangGraph, і
-MCP-клієнтів.
-"""
+Core-функції спільні для LangChain-обгорток і MCP-сервера: погода,
+вартість подорожі, активності, пошук знань та ідемпотентне бронювання.
+Погода, ціни й бронювання — локальні демонстраційні дані."""
 
 from __future__ import annotations
 
@@ -213,7 +192,7 @@ def find_activities_core(city: str, interest: str) -> str:
 
 
 def search_knowledge_core(query: str, limit: int = 3) -> str:
-    """Повертає документи з їхніми ID (`[travel-XX] текст ...`), щоб
+    """Повертає документи з їхніми ID (`[travel-XX] текст...`), щоб
     відповідь можна було атрибутувати до конкретного джерела, а не просто
     переказати текст без посилання.
     """
@@ -245,7 +224,7 @@ def _idempotency_key(hotel_name: str, check_in: str, nights: int, total_cost: fl
 def book_hotel_operation_id(hotel_name: str, check_in: str, nights: int, total_cost: float, currency: str = "EUR") -> str:
     """Публічна обгортка над `_idempotency_key` — той самий ключ, який
     `book_hotel_core` використовує для дедуплікації, тепер обчислюваний
-    ДО виконання дії. Потрібен для HITL (S09): показати людині operation ID
+    ДО виконання дії. Потрібен для HITL: показати людині operation ID
     у payload `interrupt()` ще до фактичного виклику tool, щоб approve на
     той самий ID завжди відповідав тому самому бронюванню (чи вже
     існуючому запису після replay/resume).
@@ -342,7 +321,7 @@ def search_knowledge(query: str) -> str:
     Використовуйте для візових правил, транспорту, безпеки, сезонності,
     музеїв і рекомендацій. Не використовуйте для погоди, обчислень чи
     бронювання. Повертає до трьох релевантних документів з їхніми ID
-    (`[travel-XX] ...`), щоб відповідь можна було атрибутувати до джерела.
+    (`[travel-XX]...`), щоб відповідь можна було атрибутувати до джерела.
     """
     return search_knowledge_core(query, limit=3)
 
@@ -361,7 +340,7 @@ def book_hotel(
     без реальної інтеграції з провайдером бронювань). Виклик ідемпотентний:
     повторний виклик з тими самими параметрами не створює дублікат.
     Executor зобов'язаний викликати interrupt перед виконанням цього
-    інструмента (буде реалізовано в S09 — HITL).
+    інструмента.
     """
     return book_hotel_core(hotel_name, check_in, nights, total_cost, currency)
 

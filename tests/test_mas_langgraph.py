@@ -1,19 +1,4 @@
-"""Тести MAS-графа: маршрутизація, реальний replan, handoff, ліміти (S05+S06).
-
-Усі тести працюють у demo-режимі (без LLM, без API-ключа) — `DemoSupervisorRouter`
-проходить той самий граф, що й live-router, лише інше джерело `RouteDecision`.
-Виконання tools тут — локальні wrappers з `tools_legacy.py` (MCP не
-підключено, `connect_mcp()` не викликається); MCP-специфічну поведінку
-(dispatch_tool, нормалізація content-блоків, isError-обробка) перевіряє
-окремий сценарій у `mcp_server.py`/`test_mcp_server.py` та ручна demo-
-перевірка S06 (див. STEP_LOG.md).
-
-`MASApp.handle_query`/`.run()` — асинхронні (S06: реальний dispatch_tool
-може викликати `await tool.ainvoke(...)`), тому тести успадковують
-`unittest.IsolatedAsyncioTestCase`, а не звичайний `TestCase`. Сховище
-(ChromaDB + booking JSON) ізольоване через `tools_legacy.configure_storage`
-у tempdir на кожен тест.
-"""
+"""Перевірки mas langgraph."""
 
 from __future__ import annotations
 
@@ -182,7 +167,7 @@ class MASSafetyLimitTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MASDispatchToolTests(unittest.IsolatedAsyncioTestCase):
-    """Прямі тести `MASApp.dispatch_tool` (S06): єдиний шлях виконання tools."""
+    """Прямі тести `MASApp.dispatch_tool`: єдиний шлях виконання tools."""
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()

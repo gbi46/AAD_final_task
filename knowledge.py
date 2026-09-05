@@ -1,9 +1,6 @@
-"""Локальна туристична база знань у ChromaDB.
+"""Локальна база туристичних знань ChromaDB з детермінованими hash-embeddings.
 
-Перенесено без змін бізнес-логіки з `Kravchuk_AAD_2/knowledge.py` (ДЗ2, Завд. 3
-"Agentic RAG"): відтворювані локальні embeddings (без мережевих викликів чи
-платних API) та persistent ChromaDB-колекція з фіксованим набором документів.
-"""
+Документи мають стабільні ідентифікатори для цитування у RAG-відповідях."""
 
 from __future__ import annotations
 
@@ -108,7 +105,7 @@ class KnowledgeBase:
 
     def search_with_ids(self, query: str, limit: int = 3) -> list[tuple[str, str]]:
         """Те саме, що `search`, але разом з ID документа — потрібно, щоб
-        відповідь researcher-агента (S05) могла посилатися на конкретне
+        відповідь researcher-агента могла посилатися на конкретне
         джерело, а не лише переказувати текст без атрибуції.
         """
         result = self.collection.query(query_texts=[query], n_results=min(limit, self.count))

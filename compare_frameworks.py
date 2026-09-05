@@ -1,42 +1,8 @@
-"""S15 — Fair Comparison (LangGraph vs CrewAI, `claude_plan/05_BONUS.md`).
+"""Порівняння LangGraph і CrewAI на чотирьох однакових live-запитах через MCP.
 
-Запускає ОДНАКОВІ запити (EVAL-01..04 з `evals.py` — той самий текст,
-жодного окремого набору fixtures) через ОБИДВА фреймворки:
-
-- LangGraph (`mas_langgraph.py`): `provider="openrouter"`, той самий
-  `OPENROUTER_MODEL`, `MASApp.connect_mcp()` — тобто ТАКОЖ через реальний
-  MCP subprocess (не local wrappers за замовчуванням), щоб порівняння
-  було чесним 1:1 з тим, як `mas_crewai.py` завжди викликає tools (S14).
-  Latency виміряний локально (`time.monotonic`); tokens отримані через
-  LangSmith SDK (та сама інфраструктура S10) — root run кожного запиту
-  трасується в ОКРЕМИЙ проєкт `aad-final-mas-comparison`, щоб не
-  змішуватись зі шумом S10-S12.
-- CrewAI (`mas_crewai.py`): підпроцес `.venv-crewai/bin/python
-  mas_crewai_bench.py "<query>" <runtime_dir>` (основний venv НЕ має
-  crewai встановленим, S14) — друкує один JSON-рядок з latency/tokens/
-  agents_used/tools_called (через `crewai.events.crewai_event_bus`, не
-  regex по логах).
-
-Обидва — ЖИВІ виклики (план прямо забороняє порівнювати demo LangGraph
-з live CrewAI); той самий OPENROUTER_MODEL, та сама temperature=0.1
-(зафіксовано в обох `_build_llm`, S14/S15). 1 warm-up запит (Привіт!,
-general, недорогий) перед вимірюваними -- відкидається з результатів,
-лише щоб прибрати cold-start upsert у ChromaDB/перше підключення MCP з
-вимірювань. Без повторів (N=1 на умову) -- вартість живих LLM-викликів
-робить повтори дорогими для навчального прототипу; це явно
-задокументовано як методологічне обмеження нижче й у README, а не
-приховано.
-
-`comparison_results.json`: per-run дані обох фреймворків + методика
-(модель, температура, MCP-режим, warm-up, кількість повторів,
-обмеження). Час розробки (план: "з S01 у зовнішньому журналі за
-реальними робочими сесіями") -- НЕ ЗІБРАНО: `codex_review/STEP_LOG.md`'s
-"Active Development Sessions" таблиця порожня з самого S01 (жодна сесія
-цього проєкту не логувала реальний робочий час поетапно) -- ретроактивно
-реконструювати це означало б вигадати число, що план прямо забороняє
-("Не підставляти оцінки як факти"). Тому `dev_time` = `null` з чесним
-поясненням, а не оцінка.
-"""
+Модель і температура однакові; один прогрів виключено з результатів.
+На сценарій виконується один вимір. LangGraph отримує токени з LangSmith,
+CrewAI — з usage metrics. Час розробки не вимірювався."""
 
 from __future__ import annotations
 
@@ -56,7 +22,7 @@ _COMPARISON_PROJECT = "aad-final-mas-comparison"
 
 WARMUP_QUERY = "Привіт!"
 
-# Той самий текст, що й evals.py (S11) -- жодного окремого набору fixtures.
+# Той самий текст, що й evals.py -- жодного окремого набору fixtures.
 QUERIES = [
     ("EVAL-01", "simple", "Оціни бюджет Львова на 3 дні для двох"),
     ("EVAL-02", "multi-step", "У Львові дощ: перевір погоду і підбери культурні активності"),
@@ -76,7 +42,7 @@ async def _run_langgraph() -> list[dict[str, Any]]:
 
     enabled = observability.configure_observability(project=_COMPARISON_PROJECT)
     if not enabled:
-        raise RuntimeError("LANGSMITH_API_KEY відсутній -- S15 не може виміряти tokens для LangGraph без нього.")
+        raise RuntimeError("LANGSMITH_API_KEY відсутній -- Неможливо виміряти tokens для LangGraph без нього.")
 
     from tools_legacy import configure_storage
 
@@ -86,7 +52,7 @@ async def _run_langgraph() -> list[dict[str, Any]]:
     runtime_dir.mkdir(parents=True, exist_ok=True)
     configure_storage(runtime_dir / "chroma_db", runtime_dir / "bookings.json")
 
-    mas = m.MASApp(provider="openrouter", run_id="s15-comparison")
+    mas = m.MASApp(provider="openrouter", run_id="framework-comparison")
     await mas.connect_mcp(
         env={
             **os.environ,
@@ -96,11 +62,11 @@ async def _run_langgraph() -> list[dict[str, Any]]:
     )
 
     # Warm-up (відкидається).
-    await mas.handle_query(WARMUP_QUERY, thread_id="s15-warmup")
+    await mas.handle_query(WARMUP_QUERY, thread_id="comparison-warmup")
 
     records = []
     for scenario_id, scenario_type, query in QUERIES:
-        thread_id = f"s15-{scenario_id.lower()}"
+        thread_id = f"comparison-{scenario_id.lower()}"
         started = time.monotonic()
         state = await mas.handle_query(query, thread_id=thread_id)
         latency_ms = int((time.monotonic() - started) * 1000)
@@ -172,7 +138,7 @@ async def _run_langgraph() -> list[dict[str, Any]]:
 def _run_crewai() -> list[dict[str, Any]]:
     crewai_python = _ROOT / ".venv-crewai" / "bin" / "python"
     if not crewai_python.exists():
-        raise RuntimeError(f"{crewai_python} не знайдено -- створіть .venv-crewai (S14 README).")
+        raise RuntimeError(f"{crewai_python} не знайдено -- створіть .venv-crewai (див. README).")
 
     runtime_dir = _RUNTIME_DIR / "crewai"
 
@@ -238,14 +204,8 @@ def main() -> None:
             "warm_up": f"1 discarded call ({WARMUP_QUERY!r}) per framework before measured queries",
             "repeats": "N=1 per scenario per framework (live LLM calls cost real tokens; repeats were not run -- documented limitation, not hidden)",
             "dev_time": None,
-            "dev_time_note": (
-                "BLOCKED/unavailable: codex_review/STEP_LOG.md's 'Active Development "
-                "Sessions' table has been empty since S01 -- no per-session work-time "
-                "was logged for either framework. Reconstructing it retroactively "
-                "would mean inventing a number, which the plan explicitly forbids "
-                "('Не підставляти оцінки як факти')."
-            ),
-            "loc": "see count_loc.py output / README S15 table",
+            "dev_time_note": "Development time was not recorded for either framework.",
+            "loc": "see count_loc.py output / README comparison table",
         },
         "langgraph": langgraph_records,
         "crewai": crewai_records,

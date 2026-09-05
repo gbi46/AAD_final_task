@@ -1,51 +1,8 @@
-"""HITL (Human-in-the-Loop) для ризикового MCP-tool `book_hotel` (S09).
+"""Підтвердження book_hotel через interrupt і Command(resume=...).
 
-`RISKY_TOOLS` тут — єдине джерело істини для того, які tools вимагають
-людського підтвердження перед виконанням; `approval_gate`-вузол графа
-(`MASApp._approval_gate_node` у `mas_langgraph.py`) і `tool_guardrail`
-(`guardrails.py`, S08 — allowlist per agent) працюють НЕЗАЛЕЖНО одне від
-одного: allowlist каже "чи агенту взагалі дозволено цей tool", HITL каже
-"навіть якщо дозволено — виконати можна лише після підтвердження людини".
-
-Механізм (деталі архітектури — у `mas_langgraph.py`):
-
-1. `BillingAgent._executor_node`, зустрівши крок з tool із `RISKY_TOOLS`,
-   НЕ виконує його (жодного dispatch) — повертає `pending_risky_step` із
-   billing-підграфа назовні.
-2. `MASApp._billing_node` перетворює це на `pending_approval` у
-   зовнішньому стані (`agent_name`, `tool`, повні `args`, `consequences`,
-   детермінований `operation_id` — той самий ключ, що й ідемпотентність
-   `book_hotel_core`) і залишає `completed=False`.
-3. `MASApp._supervisor_node` бачить `pending_approval` і маршрутизує
-   ПРЯМО до `approval_gate` (без повторної LLM-класифікації).
-4. `MASApp._approval_gate_node` викликає `interrupt(payload)` — граф
-   ставиться на паузу; ніякого tool call ще не сталося. Рішення надходить
-   через `Command(resume={"action": "approve"|"reject"|"edit", ...})` для
-   ТОГО САМОГО `thread_id` (потребує checkpointer — `MASApp(checkpointer=...)`,
-   той самий файловий `AsyncSqliteSaver`, що й у S07).
-
-Код ДО `interrupt()` (кроки 1–3, а також початок `_approval_gate_node` до
-самого виклику `interrupt()`) не має side effects — LangGraph повторно
-виконує цей шлях при resume, і жоден book_hotel виклик там не станеться,
-доки не отримано explicit рішення. `book_hotel_core`'s ідемпотентність
-(S02) додатково захищає від дубля навіть якщо approve сталося двічі
-(рестарт/replay) — той самий `operation_id`/`idempotency_key` повертає
-вже наявний запис, а не створює новий.
-
-Boolean `approved=True`, який LLM міг би сам згенерувати як частину
-tool-виклику, НЕ приймається як підтвердження: `_approval_gate_node`
-розпізнає лише dict-рішення з `action` рівно одним із
-`{"approve", "reject", "edit"}` (перевірка нижче, `is_valid_decision`).
-
-Демонстрація трьох сценаріїв (approve/reject/edit) — запуском цього
-файлу як CLI (кожен виклик — окремий процес, checkpoint у файловому
-SqliteSaver переживає його завершення, як і в S07):
-
-    python hitl.py approve
-    python hitl.py reject
-    python hitl.py edit
-    python hitl.py invalid-edit
-"""
+Підтримуються approve, reject і edit з повторною валідацією аргументів.
+SQLite зберігає паузу між процесами; ідемпотентний booking запобігає дублям.
+CLI: approve / reject / edit / invalid-edit / pause / resume approve."""
 
 from __future__ import annotations
 
@@ -69,12 +26,9 @@ RISKY_TOOLS = {"book_hotel"}
 
 
 def is_valid_decision(decision: Any) -> bool:
-    """Дійсне людське рішення — dict з action у дозволеному переліку.
+    """Приймати лише dict з явною дією approve, reject або edit.
 
-    НЕ приймає bare `True`/`{"approved": True}` — саме така форма могла б
-    бути передана LLM самостійно (без реального втручання людини), а план
-    прямо забороняє трактувати це як підтвердження.
-    """
+    Boolean True або approved=True не є валідним рішенням."""
     return isinstance(decision, dict) and decision.get("action") in ("approve", "reject", "edit")
 
 
@@ -143,7 +97,7 @@ _CROSS_PROCESS_THREAD_ID = "hitl-demo-cross-process"
 
 
 async def run_pause_only() -> None:
-    """Фаза 1 (окремий процес): дійти до interrupt() і завершитись —
+    """Фаза 1 (окремий процес): дійти до interrupt і завершитись —
     жодного tool call ще не відбулося. Демонструє "пауза → новий процес →
     resume" по-справжньому (а не в межах одного інтерпретатора, як
     `run_scenario`)."""

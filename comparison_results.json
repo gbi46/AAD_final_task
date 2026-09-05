@@ -7,8 +7,8 @@
     "warm_up": "1 discarded call ('Привіт!') per framework before measured queries",
     "repeats": "N=1 per scenario per framework (live LLM calls cost real tokens; repeats were not run -- documented limitation, not hidden)",
     "dev_time": null,
-    "dev_time_note": "BLOCKED/unavailable: codex_review/STEP_LOG.md's 'Active Development Sessions' table has been empty since S01 -- no per-session work-time was logged for either framework. Reconstructing it retroactively would mean inventing a number, which the plan explicitly forbids ('Не підставляти оцінки як факти').",
-    "loc": "see count_loc.py output / README S15 table"
+    "dev_time_note": "Development time was not recorded for either framework.",
+    "loc": "see count_loc.py output / README comparison table"
   },
   "langgraph": [
     {

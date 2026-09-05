@@ -1,5 +1,4 @@
-"""Тест count_loc.py (S15): фіксоване правило LOC (не порожні, не чисто
-коментарні рядки) застосовується детерміновано."""
+"""Перевірки count loc."""
 
 from __future__ import annotations
 
@@ -25,8 +24,8 @@ class CountLocTests(unittest.TestCase):
             fh.write(content)
             path = Path(fh.name)
         try:
-            # Рядки, що рахуються: "import os", "def f():",
-            # "    return 1  # trailing comment counts (...)" -> 3.
+            # Рядки, що рахуються: "import os", "def f:",
+            # " return 1 # trailing comment counts (...)" -> 3.
             self.assertEqual(count_loc(path), 3)
         finally:
             path.unlink()

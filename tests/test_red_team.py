@@ -1,10 +1,4 @@
-"""Тести red_team.py (S12 — Red Team).
-
-Перевіряє, що демо-режим дає pass-rate=100% для всіх 7 RT-сценаріїв (через
-СПРАВЖНІЙ MAS/dispatcher), і що RT-статус реально може бути "fail" — тобто
-це не rubber-stamp перевірка: якщо гвардрейл дійсно обійдено, red_team.py
-про це повідомляє, а не мовчки показує pass.
-"""
+"""Перевірки red team."""
 
 from __future__ import annotations
 
@@ -52,7 +46,7 @@ class RedTeamDemoModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rec.controlled)
 
     def test_rt02_raw_pii_actually_present_before_redaction(self) -> None:
-        """Ключова вимога плану: сама наявність [REDACTED] без підтвердженого
+        """сама наявність [REDACTED] без підтвердженого
         сирого PII на вході -- НЕ доказ. Перевіряємо, що red_team.py
         реально підтверджує обидва боки."""
         rec = self.by_id["RT-02"]

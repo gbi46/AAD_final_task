@@ -1,22 +1,7 @@
-"""Структуроване журналювання траєкторії MAS.
+"""JSON-траєкторії MAS з agent_name, вузлами й викликами інструментів.
 
-Розширено з `Kravchuk_AAD_1/trajectory_logger.py` (ДЗ1, Завд. 3) для потреб
-мультиагентної системи (S05):
-
-- додано поле `agent_name` до кожного кроку — яка саме спеціалізована нода
-  MAS (supervisor/billing/tech/researcher/general) виконала крок, без втрати
-  наявних полів run_id, node, tool_calls, timestamp, duration;
-- перед збереженням чутливі значення (ключі API у вхідних/вихідних даних чи
-  аргументах інструментів) маскуються `_sanitize`, щоб trajectory.json можна
-  було вільно передавати на перевірку;
-- ліміт довжини поля збільшено з 500 до `max_field_chars` (типово 4000) —
-  попередній жорсткий поріг 500 символів фактично підміняв повний крок
-  урізаним резюме; кроки й далі обмежені (проти патологічного розміру), але
-  залишаються придатними для audit/evals/red-team на наступних рівнях;
-- (S08) `_redact_text` додатково пропускає значення через `output_guardrail`
-  з `guardrails.py` — маскує PII (email/телефон/картка/IBAN/ІПН) у
-  експортованому trajectory.json, не лише API-ключі.
-"""
+Перед записом маскуються API-ключі та PII. Максимальна довжина поля —
+4000 символів; довші значення обрізаються."""
 
 from __future__ import annotations
 
@@ -42,7 +27,7 @@ def _redact_text(value: str) -> str:
     redacted = value
     for pattern in _SENSITIVE_PATTERNS:
         redacted = pattern.sub(_REDACTED, redacted)
-    redacted, _pii_found = output_guardrail(redacted)  # S08: PII, не лише API-ключі
+    redacted, _pii_found = output_guardrail(redacted)  #: PII, не лише API-ключі
     return redacted
 
 

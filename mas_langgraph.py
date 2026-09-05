@@ -1,28 +1,8 @@
-"""Мультиагентна система (MAS) туристичної координації над LangGraph (S05+S06).
+"""Туристична MAS: supervisor, бюджетний підграф, ReAct, RAG і загальні відповіді.
 
-Supervisor-вузол маршрутизує запит між чотирма спеціалізованими агентами:
-
-- `billing` — бюджет і бронювання: підграф planner → executor → replanner,
-  перенесений і адаптований з `Kravchuk_AAD_2/plan_execute.py` (без
-  persistence/HITL — це S07/S09; `book_hotel` тут НЕ викликається
-  автоматично, лише `calculate_trip_cost`/`search_knowledge`).
-- `tech` — погода, маршрут, активності: ReAct LLM → tools → LLM,
-  перенесений і адаптований з `Kravchuk_AAD_1/agent.py`.
-- `researcher` — туристичні правила й FAQ: LLM вирішує, чи потрібен
-  `search_knowledge` (Agentic RAG), відповідь цитує ID документів; при
-  підключеному MCP спершу перевіряє статичний resource `faq://general`
-  (дешевше за RAG) і лише тоді звертається до tool.
-- `general` — привітання й уточнення без ризикових викликів; при
-  підключеному MCP формує відповідь через prompt `travel_reply`.
-
-Усі три агенти викликають tools через ОДИН спільний dispatcher
-(`MASApp.dispatch_tool`, S06) — той самий метод обслуговує локальні
-LangChain-обгортки з `tools_legacy.py` (за замовчуванням) і MCP-tools,
-завантажені через `MultiServerMCPClient` після `await MASApp.connect_mcp()`
-(stdio, абсолютний шлях до `mcp_server.py`, поточний `sys.executable`). Це
-та сама точка, куди S08 додасть guardrail-політики (allowlist per agent,
-rate-limit).
-"""
+Єдиний dispatcher перевіряє права та валідує локальні й MCP-виклики.
+Бронювання проходить HITL; AsyncSqliteSaver підтримує відновлення стану.
+Режим demo використовує детерміновані рішення, live — LLM-провайдера."""
 
 from __future__ import annotations
 
@@ -102,7 +82,7 @@ def _stringify_tool_result(result: Any) -> str:
 
     Локальні LangChain-обгортки з `tools_legacy.py` повертають готовий
     `str`. MCP-tool через `.ainvoke()` повертає список content-блоків
-    (`[{"type": "text", "text": "...", ...}, ...]`) — без цієї нормалізації
+    (`[{"type": "text", "text": "...",...},...]`) — без цієї нормалізації
     агенти отримували б Python-репр списку словників замість тексту.
     """
     if isinstance(result, str):
@@ -146,8 +126,8 @@ class MASState(TypedDict, total=False):
     step_count: int  # глобальний лічильник візитів supervisor
     trajectory: Annotated[list[dict[str, Any]], _merge_trajectory]
     completed: bool
-    pending_approval: dict[str, Any] | None  # зарезервовано для HITL (S09), поки завжди None
-    thread_id: str  # зарезервовано для persistence (S07)
+    pending_approval: dict[str, Any] | None  # Дія, що очікує підтвердження
+    thread_id: str  # Ідентифікатор сесії
     agent_step_counts: dict[str, int]
     handoff_context: dict[str, Any] | None
     handoff_count: int
@@ -232,7 +212,7 @@ class LiveSupervisorRouter:
         return decision
 
 
-# --- billing: planner -> executor -> replanner (з ДЗ2 plan_execute.py) -----
+# --- billing: planner -> executor -> replanner -----
 
 
 _BILLING_STEP_FORMAT_HINT = (
@@ -245,7 +225,7 @@ _BILLING_STEP_FORMAT_HINT = (
 
 
 class BillingPlan(BaseModel):
-    """Структурований план бюджетно-довідкових кроків (без book_hotel — S09)."""
+    """Структурований план бюджетних і довідкових кроків."""
 
     goal: str = Field(description="Головна ціль користувача щодо бюджету/бронювання")
     steps: list[str] = Field(description=f"Послідовність з 1-4 кроків. {_BILLING_STEP_FORMAT_HINT}")
@@ -285,9 +265,8 @@ class DemoBillingPlanner:
             # Явний намір забронювати -> ЗМІШАНИЙ план: спершу безпечний
             # calculate_trip_cost (виконується одразу, без підтвердження),
             # потім book_hotel (RISKY_TOOLS — виконавець зупиниться саме на
-            # цьому кроці для HITL, S09; approval_gate вирішить його долю).
-            # Синтетичні демо-параметри бронювання ("Усі бронювання
-            # синтетичні" — вимога плану).
+            # цьому кроці для HITL,; approval_gate вирішить його долю).
+            # Синтетичні параметри демонстраційного бронювання.
             city = _extract_city(goal, default="Париж")
             days = _extract_days(goal, default=2)
             steps = [
@@ -347,11 +326,11 @@ class BillingState(TypedDict, total=False):
     current_step: int
     results: list[str]
     completed: bool
-    pending_risky_step: dict[str, Any] | None  # S09: сигнал назовні, tool ще НЕ виконано
+    pending_risky_step: dict[str, Any] | None  #: сигнал назовні, tool ще НЕ виконано
 
 
 class BillingAgent:
-    """Підграф billing: окремі planner/executor/replanner-вузли (S05)."""
+    """Підграф billing: окремі planner/executor/replanner-вузли."""
 
     def __init__(
         self,
@@ -414,10 +393,10 @@ class BillingAgent:
         name, arguments = _decode_step(state["plan"][index])
 
         if name in RISKY_TOOLS:
-            # Ризикова дія (S09): НЕ виконуємо тут жодного dispatch. Billing
+            # Ризикова дія: НЕ виконуємо тут жодного dispatch. Billing
             # завершує свій підграф і сигналізує pending_risky_step назовні
             # — MASApp._billing_node перетворює це на pending_approval, а
-            # approval_gate ставить граф на паузу через interrupt() ДО
+            # approval_gate ставить граф на паузу через interrupt ДО
             # будь-якого виклику tool.
             self.logger.log(
                 "billing_executor_pending_approval",
@@ -449,7 +428,7 @@ class BillingAgent:
 
     def _replanner_node(self, state: BillingState) -> dict[str, Any]:
         # Виконавець уже позначив completed=True (звичайне завершення плану
-        # АБО очікування підтвердження ризикової дії, S09) — не запускаємо
+        # АБО очікування підтвердження ризикової дії, ) — не запускаємо
         # ще один зайвий (демо/LLM) виклик replanner, який міг би про це не
         # знати й повернути "continue".
         if state.get("completed"):
@@ -496,14 +475,14 @@ class BillingAgent:
         return final["plan"], final["results"], final.get("pending_risky_step")
 
 
-# --- tech: ReAct LLM -> tools -> LLM (з ДЗ1 agent.py) -----------------------
+# --- tech: ReAct LLM -> tools -> LLM -----------------------
 
 _TECH_SYSTEM_PROMPT = """Ти — оперативний туристичний агент підтримки маршруту. Використовуй
 tools get_weather і find_activities для фактів, не вигадуй дані. Відповідай українською."""
 
 
 class DemoTechDecisionModel:
-    """Детермінована заміна LLM для tech (адаптовано з ДЗ1 DemoDecisionModel)."""
+    """Детермінована заміна LLM для tech."""
 
     def invoke(self, messages: list[BaseMessage]) -> AIMessage:
         query = next((m.content for m in messages if isinstance(m, HumanMessage)), "")
@@ -540,7 +519,7 @@ class TechState(TypedDict, total=False):
 
 
 class TechAgent:
-    """Підграф tech: agent -> tools -> agent (перенесено з ДЗ1 TravelAgent)."""
+    """Підграф tech: agent -> tools -> agent."""
 
     def __init__(
         self,
@@ -672,9 +651,9 @@ class ResearcherAgent:
         self.logger = logger
         self.guard = guard
         self.dispatch = dispatch
-        # general_faq заповнюється MASApp.connect_mcp() (S06) з resource
+        # general_faq заповнюється MASApp.connect_mcp з resource
         # faq://general; поки MCP не підключено — лишається None і fast-path
-        # нижче просто не спрацьовує (RAG-шлях без змін від S05).
+        # нижче просто не спрацьовує (RAG-шлях без змін від ).
         self.general_faq: list[dict[str, str]] | None = None
         self.search_tool = TOOLS_BY_NAME["search_knowledge"]  # лише схема для bind_tools
         if provider != "demo":
@@ -770,8 +749,8 @@ class GeneralAgent:
         self.provider = provider
         self.llm = llm
         self.logger = logger
-        # mcp_client заповнюється MASApp.connect_mcp() (S06); поки None —
-        # поведінка ідентична S05 (canned demo-рядок чи прямий LLM-виклик).
+        # mcp_client заповнюється MASApp.connect_mcp; поки None —
+        # поведінка ідентична (canned demo-рядок чи прямий LLM-виклик).
         self.mcp_client: Any = None
 
     async def run(self, goal: str) -> str:
@@ -825,17 +804,17 @@ class MASApp:
         self.logger = TrajectoryLogger(run_id)
         self.llm: Any = None
         self.mcp_client: Any = None
-        # checkpointer/interrupt_after — durable state (S07). Без checkpointer
-        # (типовий випадок для S01–S06 і більшості тестів) граф поводиться як
+        # checkpointer/interrupt_after — durable state. Без checkpointer
+        # (типовий випадок для і більшості тестів) граф поводиться як
         # раніше: без збереження стану між викликами. З файловим SqliteSaver
         # (persistence_demo.py) той самий граф переживає перезапуск процесу.
         self.checkpointer = checkpointer
         self.interrupt_after = interrupt_after
-        # ОДИН екземпляр на весь MASApp (S08): rolling window не обнуляється
+        # ОДИН екземпляр на весь MASApp: rolling window не обнуляється
         # на кожен вузол графа — перевіряється рівно один раз на вхід запиту,
         # у handle_query. Тести підставляють rate_limiter із фейковим clock.
         self.rate_limiter = rate_limiter or RateLimiter()
-        # Локальні LangChain-обгортки за замовчуванням; connect_mcp() (S06)
+        # Локальні LangChain-обгортки за замовчуванням; connect_mcp
         # ОНОВЛЮЄ цей самий словник in-place MCP-tools з тими самими іменами
         # — агенти тримають лише bound-метод dispatch_tool, тому підміна
         # діє одразу, без перестворення агентів.
@@ -900,7 +879,7 @@ class MASApp:
             # max_tokens: без явного ліміту ChatOpenAI/OpenRouter підставляють
             # верхню межу моделі (тут — 65536), а обмежений баланс ключа не
             # покриває стільки навіть для короткої відповіді — перевірено
-            # емпірично (402 "requires more credits ... requested up to
+            # емпірично (402 "requires more credits... requested up to
             # 65536 tokens"). 4096 з запасом покриває наші структуровані
             # відповіді (RouteDecision/BillingPlan/BillingReplanDecision) і
             # звичайні репліки general.
@@ -914,10 +893,10 @@ class MASApp:
 
         raise ValueError(f"Невідомий provider: {provider!r} (очікується 'demo', 'gemini' або 'openrouter')")
 
-    # -- MCP (S06) -------------------------------------------------------------
+    # -- MCP -------------------------------------------------------------
 
     async def connect_mcp(self, server_path: str | Path | None = None, env: dict[str, str] | None = None) -> None:
-        """Підключити travel-support MCP-сервер (S03) через stdio.
+        """Підключити travel-support MCP-сервер через stdio.
 
         Абсолютний шлях до `mcp_server.py` і поточний `sys.executable` (а не
         системний `python` з PATH) — інакше сервер міг би стартувати в
@@ -941,7 +920,7 @@ class MASApp:
         # handle_tool_errors=False: за замовчуванням адаптер ковтає
         # CallToolResult(isError=True) і повертає текст помилки як звичайний
         # успішний рядок (щоб ReAct-агент міг "самовиправитись") — саме
-        # той фальшивий успіх, якого явно вимагає уникати план. З False
+        # помилковий результат. З False
         # такий збій підіймається як виключення й ловиться dispatch_tool
         # так само, як помилка локального tool (виявлено emпірично і
         # виправлено — інакше невалідне місто виглядало б як "успішний"
@@ -967,7 +946,7 @@ class MASApp:
         """ЄДИНА точка виклику будь-якого tool з будь-якого агента (billing/
         tech/researcher) — локального чи MCP-tool з `self.tools_by_name`.
 
-        Guardrail-політики (S08), у порядку застосування:
+        Guardrail-політики, у порядку застосування:
         1. `tool_guardrail(agent_name, name)` — allowlist per agent,
            перевіряється ПЕРЕД будь-яким local/MCP викликом. `agent_name`
            надходить з контрольованого execution context (кожен агент
@@ -1066,7 +1045,7 @@ class MASApp:
         """Обгортка: додає до `update["trajectory"]` лише нові кроки, залишені
         цим викликом у спільному self.logger — без дублювання (reducer вище
         додатково підстраховує ідемпотентність при повторних візитах). Також
-        маскує PII у `results`/`messages` через `output_guardrail` (S08) —
+        маскує PII у `results`/`messages` через `output_guardrail` —
         ОДНЕ місце для всіх agent-вузлів, а не окремий виклик у кожному.
 
         `fn` може бути sync (supervisor/general без MCP) або async (billing/
@@ -1101,7 +1080,7 @@ class MASApp:
     @staticmethod
     def _apply_output_guardrail(update: dict[str, Any]) -> dict[str, Any]:
         """Маскує PII (email/телефон/картка/IBAN/ІПН) у `results`/`messages`
-        ПЕРЕД поверненням у стан — S08, застосовується до кожного agent-вузла.
+        ПЕРЕД поверненням у стан —, застосовується до кожного agent-вузла.
         """
         if update.get("results"):
             update = {**update, "results": [output_guardrail(item)[0] for item in update["results"]]}
@@ -1150,7 +1129,7 @@ class MASApp:
                 "messages": [AIMessage(content=message)],
             }
 
-        # Ризикова дія очікує підтвердження (S09) — маршрутизуємо ПРЯМО до
+        # Ризикова дія очікує підтвердження — маршрутизуємо ПРЯМО до
         # approval_gate, без повторної LLM/keyword-класифікації (той самий
         # принцип, що й для handoff нижче: явний контрольований стан
         # переважає над router.decide).
@@ -1187,7 +1166,7 @@ class MASApp:
             }
 
         if pending_risky_step is not None:
-            # S09: НЕ completed — граф має пройти через approval_gate.
+            #: НЕ completed — граф має пройти через approval_gate.
             tool_name = pending_risky_step["name"]
             args = pending_risky_step["arguments"]
             operation_id = book_hotel_operation_id(**args) if tool_name == "book_hotel" else None
@@ -1213,16 +1192,16 @@ class MASApp:
         return {
             "completed": True,
             "plan": plan,
-            "current_step": len(results),  # відображає прогрес billing у зовнішньому стані (S07: порівняння до/після)
+            "current_step": len(results),  # відображає прогрес billing у зовнішньому стані (: порівняння до/після)
             "results": results,
             "messages": [AIMessage(content=answer)],
             "handoff_context": None,
         }
 
     async def _approval_gate_node(self, state: MASState) -> dict[str, Any]:
-        """HITL approval gate (S09): interrupt() ставить граф на паузу ДО
+        """HITL approval gate: interrupt ставить граф на паузу ДО
         будь-якого виклику ризикового tool. Рішення надходить через
-        `Command(resume={"action": "approve"|"reject"|"edit", ...})` для
+        `Command(resume={"action": "approve"|"reject"|"edit",...})` для
         того самого thread_id (потребує checkpointer — `MASApp(checkpointer=...)`).
         """
         pending = state.get("pending_approval")
@@ -1363,7 +1342,7 @@ class MASApp:
         return {"configurable": {"thread_id": thread_id}}
 
     async def handle_query(self, query: str, thread_id: str = "demo") -> dict[str, Any]:
-        """Вхід у MAS (S08): rate-limit і input guardrail перевіряються ТУТ,
+        """Вхід у MAS: rate-limit і input guardrail перевіряються ТУТ,
         ДО побудови стану й виклику графа — заблокований запит жодного
         вузла/tool не торкається (не лише повертає "безпечну" відповідь
         post-hoc). `thread_id` використовується і як `session_id` для
@@ -1389,7 +1368,7 @@ class MASApp:
         return state
 
     async def resume(self, thread_id: str) -> dict[str, Any]:
-        """Продовжити граф із checkpoint, збереженого для `thread_id` (S07).
+        """Продовжити граф із checkpoint, збереженого для `thread_id`.
 
         `None` як вхід — стандартний спосіб LangGraph "продовжити з останнього
         checkpoint" (потребує підключеного `checkpointer`); працює однаково,
@@ -1415,7 +1394,7 @@ class MASApp:
 async def _run_demo() -> None:
     from tools_legacy import configure_storage
 
-    # Демо-запуск — це runtime-сесія, не контрольний артефакт здачі: сховище
+    # Демо-запуск — це runtime-сесія, не збережений приклад стану: сховище
     # спрямовуємо у gitignored runtime/, а не в корінь репозиторію. Той самий
     # runtime_dir передається MCP-subprocess'у через env, щоб і його ChromaDB/
     # bookings.json теж лишались поза коренем репозиторію.
@@ -1425,7 +1404,7 @@ async def _run_demo() -> None:
 
     mas = MASApp(provider="demo", run_id="mas-demo")
     # provider="demo" лишає маршрутизацію й планування детермінованими
-    # (без LLM/API-ключа), а connect_mcp() підміняє ВИКОНАННЯ tools на
+    # (без LLM/API-ключа), а connect_mcp підміняє ВИКОНАННЯ tools на
     # справжні виклики subprocess MCP-сервера — і те, і інше проходить
     # через той самий граф і той самий dispatch_tool.
     mcp_env = {
@@ -1452,8 +1431,8 @@ async def _run_demo() -> None:
 
     from trajectory_logger import save_trajectories
 
-    save_trajectories([mas.logger.as_dict()], runtime_dir / "trajectory_demo_s06.json")
-    print(f"\nТраєкторію збережено у {runtime_dir / 'trajectory_demo_s06.json'} (demo-режим, tools через MCP).")
+    save_trajectories([mas.logger.as_dict()], runtime_dir / "trajectory_demo.json")
+    print(f"\nТраєкторію збережено у {runtime_dir / 'trajectory_demo.json'} (demo-режим, tools через MCP).")
 
 
 if __name__ == "__main__":

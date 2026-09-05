@@ -1,38 +1,7 @@
-"""Багаторівневі guardrails MAS: input, output, tool, rate-limit (S08).
+"""Захист MAS: перевірка вводу, маскування PII, права на tools і ліміт запитів.
 
-Реалізовано три функції (`input_guardrail`, `output_guardrail`,
-`tool_guardrail`) і клас `RateLimiter` з методом `.check()` — саме так
-план трактує "4 функції + клас" (три функції плюс метод класу), формулювання
-завдання про це прямо неоднозначне. `rate_limit_guardrail` додано як тонку
-функціональну обгортку над `RateLimiter.check` для симетрії API.
-
-Кожен рівень закриває конкретний ризик з OWASP ASI 2026 (детальніше й з
-доказами — таблиця у README):
-
-| Guardrail | ASI | Що захищає |
-|---|---|---|
-| input_guardrail | ASI01 (Agent Goal Hijack) | prompt injection через запит користувача чи недовірений зовнішній текст |
-| output_guardrail | ASI06 (Memory Poisoning) | витік PII у відповідях, trajectory, observability |
-| tool_guardrail | ASI03 (Identity and Privilege Abuse) | обмеження прав агентів на tools |
-| RateLimiter | ASI08 (Cascading Failures) | обмежує blast radius при зловживанні за сесію |
-
-Інтеграція у MAS (`mas_langgraph.py`, S08):
-- `input_guardrail` викликається в `MASApp.handle_query` (запит користувача,
-  ДО побудови графа — заблокований запит жодного вузла/tool не торкається)
-  і в `MASApp.dispatch_tool` (результат tool/resource/RAG — недовірений
-  зовнішній текст ДО того, як він потрапить у подальший LLM-контекст).
-- `output_guardrail` викликається в `MASApp._node`-обгортці для кожного
-  agent-вузла (маскує PII у `results`/`messages` перед поверненням у стан)
-  і в `TrajectoryLogger._redact_text` (маскує PII в експортованому
-  trajectory.json/observability payload).
-- `tool_guardrail` перевіряється в `MASApp.dispatch_tool` ПЕРЕД будь-яким
-  local/MCP викликом tool — роль (`agent_name`) надходить з контрольованого
-  execution context графа (передається кожним вузлом явно), а не з фрази
-  користувача.
-- `RateLimiter` — один екземпляр на `MASApp`, перевіряється рівно один раз
-  на вхід запиту (`handle_query`), не в кожному вузлі графа (інакше
-  rolling window обнулявся б і ніколи не спрацював).
-"""
+Regex-фільтри виявляють відомі шаблони, але не гарантують захист від
+перефразованих чи закодованих інструкцій."""
 
 from __future__ import annotations
 

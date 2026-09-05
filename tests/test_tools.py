@@ -1,11 +1,4 @@
-"""Тести Pydantic-схем і п'яти публічних tools з tools_legacy.py.
-
-Адаптовано з `Kravchuk_AAD_1/tests/test_tools.py` та
-`Kravchuk_AAD_2/tests/test_tools.py`: валідні/невалідні аргументи для
-кожного tool, RAG-пошук і побічна дія бронювання (тепер з перевіркою
-ідемпотентності). Сховище (ChromaDB + JSON бронювань) ізольоване для
-кожного тесту через tempfile.
-"""
+"""Перевірки tools."""
 
 from __future__ import annotations
 

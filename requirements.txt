@@ -1,6 +1,3 @@
-# Мінімальний набір прямих залежностей базового рівня (S01).
-# Версії зафіксовані за фактичною інсталяцією у venv Python 3.12 (pip freeze),
-# не є довільними pin'ами. Повний pip freeze — у codex_review/evidence/ (S01).
 pydantic==2.13.5
 langchain==1.4.0
 langchain-core==1.6.2

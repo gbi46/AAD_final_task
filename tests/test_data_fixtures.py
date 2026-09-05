@@ -1,5 +1,4 @@
-"""Тести data/ (S16): синтетичні fixtures не розходяться з кодом, що їх
-використовує чи документує."""
+"""Перевірки data fixtures."""
 
 from __future__ import annotations
 
@@ -13,10 +12,7 @@ _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
 class KnowledgeSeedSnapshotTests(unittest.TestCase):
-    """data/knowledge_seed.json -- довідковий знімок KNOWLEDGE_DOCUMENTS
-    (S16: data/ обов'язковий у структурі здачі). Джерело істини лишається
-    knowledge.py; цей тест ловить розсинхронізацію, якщо документи
-    змінили в одному місці й забули в іншому."""
+    """Довідковий JSON-знімок відповідає документам knowledge.py."""
 
     def test_seed_matches_knowledge_documents(self) -> None:
         payload = json.loads((_DATA_DIR / "knowledge_seed.json").read_text(encoding="utf-8"))

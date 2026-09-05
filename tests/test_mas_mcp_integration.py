@@ -1,12 +1,4 @@
-"""Тести підключення MAS до реального MCP-сервера через subprocess (S06).
-
-На відміну від `test_mas_langgraph.py` (локальні wrappers, MCP не
-підключено), тут `MASApp.connect_mcp()` реально піднімає `mcp_server.py`
-як subprocess (`MultiServerMCPClient`, stdio, `sys.executable`) — і billing/
-tech/researcher/general виконують tools/resource/prompt через нього.
-Кожен тест ізолює сховище через `MCP_KNOWLEDGE_PATH`/`MCP_BOOKING_PATH` у
-власному `tmp_path`, тому паралельні тести не заважають один одному.
-"""
+"""Перевірки mas mcp integration."""
 
 from __future__ import annotations
 
@@ -38,7 +30,7 @@ class MASMCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def test_billing_and_tech_both_call_real_mcp_subprocess(self) -> None:
-        """≥2 запити реально звертаються до subprocess MCP (acceptance S06):
+        """≥2 запити реально звертаються до subprocess MCP (acceptance ):
         billing (calculate_trip_cost) і tech (get_weather+find_activities).
         Перевіряємо і сам результат, і що trajectory зафіксувала tool_dispatch
         із agent_name для обох.
@@ -68,7 +60,7 @@ class MASMCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_mcp_server_business_validation_error_is_not_fake_success(self) -> None:
         """Невалідне місто — MCP-сервер повертає CallToolResult(isError=True).
         З handle_tool_errors=False це підіймається як ToolDispatchError, а НЕ
-        повертається як фальшивий успішний текст (план явно цього вимагає).
+        повертається як фальшивий успішний текст.
         """
         with self.assertRaises(ToolDispatchError):
             await self.mas.dispatch_tool("get_weather", {"city": "Атлантида", "days": 1}, "tech")

@@ -1,42 +1,8 @@
-"""Демонстрація durable state MAS через файловий SqliteSaver (S07).
+"""Демонстрація відновлення MAS у новому процесі з SQLite checkpoint.
 
-Запуск — ДВА ОКРЕМІ процеси (не два виклики в одному інтерпретаторі; саме
-так план вимагає довести, що стан реально пережив закриття процесу, а не
-просто лишився в пам'яті одного Python-об'єкта):
-
-    python persistence_demo.py pause    # процес А
-    python persistence_demo.py resume   # процес Б (новий інтерпретатор)
-
-Процес А: створює billing-запит, виконує рівно ОДИН крок графа (supervisor
-— маршрутизація), ставить граф на паузу (`interrupt_after=["supervisor"]`),
-знімає snapshot стану, закриває з'єднання виходом з `async with` (як
-завершення процесу) — жодного tool call ще не відбулося.
-
-Процес Б: відкриває НОВЕ з'єднання до того самого файлу `agent_state.db` і
-того самого `thread_id`, зчитує збережений checkpoint, продовжує граф з
-місця паузи (`resume()` — `None` як вхід) до завершення billing-підграфа.
-Порівнює `plan`/`current_step`/`results` до і після — доводить, що
-executor виконався РІВНО ОДИН раз (не повторно після відновлення), а не
-лише що фінальний результат виглядає правильно.
-
-Обидва процеси також перевіряють ізоляцію: інший `thread_id`
-(`OTHER_THREAD_ID`) не бачить жодного стану першого.
-
-Async, не sync `SqliteSaver`: граф викликається через `ainvoke`
-(dispatch_tool — async), а синхронний `SqliteSaver` явно не підтримує
-async-методи (LangGraph одразу підіймає `NotImplementedError` з
-підказкою використати `AsyncSqliteSaver` — перевірено емпірично).
-
-Після фази `resume`, ПІСЛЯ закриття `AsyncSqliteSaver` (окремим коротким
-sync-з'єднанням), SQLite явно checkpoint'иться
-(`PRAGMA wal_checkpoint(TRUNCATE)`) і повертається у `journal_mode=DELETE`
-— `SqliteSaver`/`AsyncSqliteSaver` вмикають WAL (`PRAGMA journal_mode=WAL`),
-а WAL-режим тримає недавні записи в окремому файлі `-wal` до checkpoint;
-без цього кроку доставлений `agent_state.db` був би неповним знімком без
-супутнього `-wal` файлу. Результат — самодостатній `agent_state.db` у
-корені репозиторію (контрольний артефакт здачі, S07), без потреби у
-відсутньому WAL.
-"""
+Фази pause і resume перевіряють план, результати та ізоляцію thread_id.
+Після закриття AsyncSqliteSaver WAL консолідується в agent_state.db,
+щоб база залишалась самодостатньою без супутніх WAL-файлів."""
 
 from __future__ import annotations
 
@@ -57,8 +23,8 @@ from trajectory_logger import save_trajectories
 _ROOT = Path(__file__).resolve().parent
 
 # Шляхи перевизначаються через env (тести спрямовують їх у tempdir, щоб не
-# чіпати справжні контрольні артефакти здачі в корені репозиторію) — типово
-# ж це саме контрольні артефакти S07: agent_state.db, chroma_db/, trajectory.json.
+# чіпати справжні збережені демонстраційні дані в корені репозиторію) — типово
+# ж це саме контрольні артефакти: agent_state.db, chroma_db/, trajectory.json.
 DB_PATH = Path(os.environ.get("PERSISTENCE_DB_PATH", str(_ROOT / "agent_state.db")))
 KNOWLEDGE_PATH = Path(os.environ.get("PERSISTENCE_KNOWLEDGE_PATH", str(_ROOT / "chroma_db")))
 TRAJECTORY_PATH = Path(os.environ.get("PERSISTENCE_TRAJECTORY_PATH", str(_ROOT / "trajectory.json")))
@@ -152,7 +118,7 @@ async def run_resume() -> None:
         print(json.dumps(other, ensure_ascii=False, indent=2))
         assert other == _EMPTY_SNAPSHOT
 
-        # Контрольний артефакт здачі: об'єднати обидві фази у trajectory.json.
+        # Демонстраційна траєкторія: об'єднати обидві фази у trajectory.json.
         runs = []
         if _PAUSE_TRAJECTORY_TMP.exists():
             runs.extend(json.loads(_PAUSE_TRAJECTORY_TMP.read_text(encoding="utf-8"))["runs"])

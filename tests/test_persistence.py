@@ -1,13 +1,4 @@
-"""Тести durable state MAS (S07): pause -> закриття процесу -> resume.
-
-На відміну від простого виклику функцій у тому самому інтерпретаторі, тут
-`persistence_demo.py pause`/`resume` запускаються як ДВА ОКРЕМІ subprocess
-(`subprocess.run([sys.executable, ...])`) — так само, як план вимагає
-довести переживання реального завершення процесу, а не лише Python-об'єкта.
-Кожен тест ізолює шляхи (`agent_state.db`, `chroma_db/`, `trajectory.json`,
-`runtime/`) через env-змінні `PERSISTENCE_*` у власному `tmp_path`, тому
-жоден тест не чіпає справжні контрольні артефакти здачі в корені проєкту.
-"""
+"""Перевірки persistence."""
 
 from __future__ import annotations
 
@@ -79,7 +70,7 @@ class PersistenceDemoTests(unittest.TestCase):
         self.assertIn("Спочатку запустіть", result.stdout + result.stderr)
 
     def test_agent_state_db_is_a_valid_self_contained_sqlite_file(self) -> None:
-        """Контрольний артефакт (S07): цілісний .db без потреби у -wal/-shm."""
+        """Контрольний артефакт: цілісний.db без потреби у -wal/-shm."""
         _run_phase("pause", self.env)
         _run_phase("resume", self.env)
 
@@ -99,7 +90,7 @@ class PersistenceDemoTests(unittest.TestCase):
             connection.close()
 
     def test_trajectory_json_has_both_phases_with_agent_name(self) -> None:
-        """Контрольний артефакт (S07): trajectory.json об'єднує обидві фази,
+        """Контрольний артефакт: trajectory.json об'єднує обидві фази,
         agent_name присутній у кожному кроці кожної фази.
         """
         _run_phase("pause", self.env)

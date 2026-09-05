@@ -1,12 +1,4 @@
-"""Тести HITL (Human-in-the-Loop) для book_hotel (S09).
-
-Покриває ADV-07..ADV-11 з codex_review/REQUIREMENTS.md:
-`interrupt()`/`Command(resume=...)` з файловим `AsyncSqliteSaver`,
-approve/reject/edit/invalid-edit, restart+replay без дублю, mixed
-safe/risky batch, researcher не може book_hotel навіть через
-approval_gate. Перевіряється вміст `bookings.json` до/після, а не лише
-текст відповіді.
-"""
+"""Перевірки hitl."""
 
 from __future__ import annotations
 
@@ -35,7 +27,7 @@ class IsValidDecisionTests(unittest.TestCase):
             self.assertTrue(is_valid_decision({"action": action}))
 
     def test_boolean_approved_is_not_a_valid_decision(self) -> None:
-        """Ключова вимога плану: boolean approved=True, який LLM міг би сам
+        """boolean approved=True, який LLM міг би сам
         передати, НЕ є людським підтвердженням."""
         self.assertFalse(is_valid_decision({"approved": True}))
         self.assertFalse(is_valid_decision(True))

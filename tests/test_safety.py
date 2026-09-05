@@ -1,9 +1,4 @@
-"""Тести захисних механізмів.
-
-Перенесено без змін з `Kravchuk_AAD_1/tests/test_safety.py`: ліміт кроків,
-тайм-аут, детектор повторюваних викликів (repeat limit). `call_with_timeout`
-— новий для S05 (використовується агентами MAS у live-режимі).
-"""
+"""Перевірки safety."""
 
 from __future__ import annotations
 

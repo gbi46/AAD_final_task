@@ -1,45 +1,8 @@
-"""Observability для MAS через LangSmith (S10).
+"""Налаштування LangSmith і демонстрація live-запитів з handoff.
 
-Налаштування — виключно змінними середовища. LangChain/LangGraph самі
-трасують кожен `.invoke()`/`.ainvoke()` на `Runnable` (LLM-виклики,
-структуровані виходи, tool calls, вкладені підграфи), щойно
-`LANGCHAIN_TRACING_V2=true` і валідний ключ заданий — жодного додаткового
-коду для базової ієрархії run'ів не потрібно.
-
-Ієрархія trace для одного запиту (root run → ... → handoff) відповідає
-структурі самого MAS-графа (S05/S06):
-
-    handle_query (root run, thread_id/run_id у метаданих)
-    └─ supervisor              (RouteDecision: with_structured_output)
-    └─ billing / tech / researcher / general   (specialist)
-        └─ billing: planner → executor → replanner (вкладений підграф,
-           executor → dispatch_tool → tool/MCP call)
-        └─ tech: agent → tools (ReAct-цикл)
-        └─ ... (handoff tech→billing: другий візит supervisor +
-           specialist-вузол у ТОМУ САМОМУ root run/thread_id — видно як
-           повторний supervisor-run з `pending_approval`/`handoff_context`
-           у вхідному стані)
-
-Чутливі дані:
-- Секрети (API-ключі з .env) НІКОЛИ не потрапляють у жоден prompt чи
-  аргумент tool — LangSmith їх і не побачить, бо трасується лише те, що
-  реально проходить через LangChain `Runnable.invoke`.
-- Синтетичні PII (потрібні для red-team перевірок, S12) — ЧЕСНЕ
-  застереження: `output_guardrail` (S08) маскує PII в `results`/
-  `messages` НА РІВНІ agent-вузла графа (`MASApp._apply_output_guardrail`)
-  і в `trajectory.json` (`trajectory_logger._redact_text`) — ОБИДВА після
-  того, як сам LLM-виклик уже стався. LangSmith же трасує сирі
-  prompt/response LangChain `Runnable` НИЖЧЕ цього рівня (безпосередньо
-  callback з LLM-клієнта) — тобто наш output_guardrail НЕ встигає
-  редагувати те, що LangSmith встигає захопити до нашого вузла. Повний
-  захист вимагав би кастомного LangChain callback/masking hook на рівні
-  самого tracer'а, якого тут немає. Тому: демонстраційні live-запити для
-  S10 навмисно НЕ містять реальних чи синтетичних PII (лише туристичні
-  дані — міста, дати, суми); red-team сценарії з PII (RT-02) запускаються
-  БЕЗ активного LangSmith tracing, щоб синтетичні тестові PII не
-  потрапляли до стороннього сервісу навіть у масктестовому вигляді. Ця
-  залишкова прогалина задокументована чесно (не приховується) — S13.
-"""
+Трасування вимкнено без ключа. Відповіді та локальні траєкторії маскують PII,
+але автоматичні callback-трейси можуть містити сирі inputs або tool results.
+Демонстраційні запити не містять персональних даних."""
 
 from __future__ import annotations
 
@@ -111,7 +74,7 @@ if __name__ == "__main__":
 
     async def main() -> None:
         mas = m.MASApp(provider="openrouter", run_id="observability-demo")
-        # ≥2 live-запити, один з реальним handoff (план S10) — жодних PII.
+        # ≥2 live-запити, один з реальним handoff  — жодних PII.
         queries = [
             ("Скільки коштуватиме подорож до Парижа на 3 дні для двох?", "obs-billing"),
             ("Яка погода у Львові і скільки коштуватиме подорож на 3 дні?", "obs-handoff"),

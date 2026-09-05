@@ -1,11 +1,4 @@
-"""Тести evals.py (S11 — Scenario Evals).
-
-Перевіряє, що прогін demo-режиму дає pass-rate=100% для всіх 5 фіксованих
-сценаріїв (через СПРАВЖНІЙ MAS-граф, не заглушку), і що live-режим без
-`OPENROUTER_API_KEY` коректно позначає кожен сценарій "blocked" (а не
-падає і не рахує його як fail) — саме blocked, за планом, НЕ входить у
-знаменник pass-rate.
-"""
+"""Перевірки evals."""
 
 from __future__ import annotations
 
@@ -47,7 +40,7 @@ class EvalsDemoModeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(record.status, "pass", record.observed)
                 self.assertEqual(record.mode, "demo")
                 # Задокументована свідома відсутність зв'язування з трейсом
-                # (collect_runs() ламає вкладеність — див. docstring evals.py).
+                # (collect_runs ламає вкладеність — див. docstring evals.py).
                 self.assertIsNone(record.trace_id)
 
     def test_eval01_billing_correct_sum(self) -> None:
@@ -79,13 +72,13 @@ class EvalsDemoModeTests(unittest.IsolatedAsyncioTestCase):
         rec = self.by_id["EVAL-05"]
         self.assertIn("book_hotel", rec.tools_called)
         self.assertIn("BOOK-", rec.observed)
-        # Латентність графа виміряна ОКРЕМО від "очікування людини" (план).
+        # Латентність графа виміряна ОКРЕМО від "очікування людини" .
         self.assertIsNotNone(rec.human_wait_ms)
         self.assertIsNotNone(rec.latency_ms)
 
     async def test_check_function_can_actually_fail(self) -> None:
         """Контрольна перевірка на "завжди PASS" антипатерн: свідомо хибний
-        check() має дати status="fail", а не мовчазний pass."""
+        check має дати status="fail", а не мовчазний pass."""
         outcome = await evals._run_query_scenario(
             "EVAL-01", evals.EVAL01_QUERY, "demo", lambda state: (False, "навмисний fail")
         )
@@ -116,9 +109,7 @@ class EvalsLiveModeBlockedTests(unittest.IsolatedAsyncioTestCase):
 class PassRateCalculationTests(unittest.TestCase):
     def test_pass_rate_excludes_blocked_from_denominator(self) -> None:
         # 2 pass, 1 fail, 2 blocked -> pass_rate рахується як 2/3 (executed),
-        # НЕ 2/5 (план: "skipped/blocked показувати окремо та не приховувати
-        # у denominator" -- тобто вони показані окремо, а не тихо влиті в
-        # знаменник як виконані).
+        # Blocked-сценарії показуються окремо й не входять у знаменник.
         statuses = ["pass", "pass", "fail", "blocked", "blocked"]
         executed = [s for s in statuses if s in ("pass", "fail")]
         passed = [s for s in executed if s == "pass"]

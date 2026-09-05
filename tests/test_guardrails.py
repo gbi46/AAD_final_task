@@ -1,9 +1,4 @@
-"""Тести guardrails.py — self-tests, edge cases, і межі МІЖ рівнями (S08).
-
-Юніт-тести на кожен guardrail окремо + запуск `python guardrails.py` як
-subprocess (план явно вимагає self-tests саме так). Інтеграція guardrails
-у MAS execution path — окремий файл `test_mas_guardrails.py`.
-"""
+"""Перевірки guardrails."""
 
 from __future__ import annotations
 
