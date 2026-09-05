@@ -3,7 +3,7 @@
 Кожен спеціаліст отримує власний allowlist через MCPServerAdapter.
 Бронювання недоступне: ця реалізація не має HITL і durable persistence.
 Потрібне окреме середовище requirements-crewai.txt; MCP-сервер працює
-через Python основного середовища.venv."""
+через Python основного середовища `.venv`."""
 
 from __future__ import annotations
 
@@ -51,8 +51,8 @@ def _build_llm() -> Any:
 
 
 def _mcp_server_params(runtime_dir: Path) -> Any:
-    """StdioServerParameters -- команда явно вказує на ГОЛОВНИЙ.venv
-    (не.venv-crewai, у якому запущено сам цей файл): mcp_server.py
+    """StdioServerParameters -- команда явно вказує на ГОЛОВНИЙ `.venv`
+    (не `.venv-crewai`, у якому запущено сам цей файл): mcp_server.py
     залежить від chromadb/mcp/pydantic з їхніми ТОЧНИМИ pinned-версіями
     основного requirements.txt, а не від того, що встановлено для
     CrewAI-клієнта."""
@@ -224,7 +224,7 @@ def run_query_with_metrics(query: str, runtime_dir: Path | None = None) -> dict[
     повертає `usage_metrics` (`crewai.types.usage_metrics.UsageMetrics` ->
     prompt/completion/total tokens) і latency_ms. Окрема функція, а не
     зміна сигнатури `run_query` -- щоб не ламати наявний контракт
-    (, `tests/test_mas_crewai.py`)."""
+    (див. `tests/test_mas_crewai.py`)."""
     import time
 
     runtime_dir = runtime_dir or (_ROOT / "runtime" / "crewai")

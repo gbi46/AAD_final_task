@@ -14,12 +14,12 @@ import mas_crewai as mc
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-# `crewai` не встановлений в основному.venv (навмисно -- конфліктує з
+# `crewai` не встановлений в основному .venv (навмисно -- конфліктує з
 # pinned requirements.txt, див. docstring mas_crewai.py) -- будь-який тест,
 # що реально ІМПОРТУЄ crewai (не лише статичні перевірки allowlist-констант
 # вище modele-рівня), під основним venv має SKIP, а не FAIL, інакше
 # звичайний `pytest tests/` без --ignore ламається для того, хто не знає
-# про окремий.venv-crewai/.
+# про окремий .venv-crewai/.
 _HAS_CREWAI = importlib.util.find_spec("crewai") is not None
 _skip_without_crewai = unittest.skipUnless(
     _HAS_CREWAI, "crewai не встановлено в цьому venv -- запустити під .venv-crewai/bin/python"
@@ -49,7 +49,7 @@ class ToolAllowlistTests(unittest.TestCase):
 @_skip_without_crewai
 class MCPConnectionTests(unittest.TestCase):
     """Справжнє MCP-підключення (реальний subprocess mcp_server.py через
-    ГОЛОВНИЙ.venv) -- без LLM, тому швидко й безкоштовно."""
+    ГОЛОВНИЙ .venv) -- без LLM, тому швидко й безкоштовно."""
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -76,7 +76,7 @@ class LLMConfigTests(unittest.TestCase):
     """`crewai.LLM(model="openrouter/...")` валідує наявність (НЕ
     справжність) `OPENROUTER_API_KEY` вже при самій побудові об'єкта — без
     жодного ключа падає `pydantic.ValidationError` ще до будь-якого
-    мережевого виклику (виявлено емпірично,: тести падали в чистому
+    мережевого виклику (виявлено емпірично: тести падали в чистому
     checkout без `.env`, хоча в дев-середовищі з реальним ключем
     проходили мовчки). Тому кожен тест тут підставляє ФІКТИВНИЙ рядок
     (не справжній секрет, жодного виклику мережі не відбувається) --
@@ -130,7 +130,7 @@ class LLMConfigTests(unittest.TestCase):
 )
 class LiveCrewRunTests(unittest.TestCase):
     """Опційний живий прогін -- підтверджує ≥3 спеціалісти + фактичний MCP
-    call , не запускається в звичайному прогоні тестів."""
+    call, не запускається в звичайному прогоні тестів."""
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -143,7 +143,7 @@ class LiveCrewRunTests(unittest.TestCase):
         що coordinator у CrewAI ПЕРЕФОРМУЛЬОВУЄ делеговану відповідь billing-
         агента власними словами (часто переводить у грн і заокруглює), а не
         передає точний рядок tool-результату так, як це робить LangGraph
-        `results` (, `operator.add` reducer над точними рядками кроків).
+        `results` (через `operator.add` reducer над точними рядками кроків).
         Це задокументована відмінність для (fidelity/precision), не
         баг цього тесту.
         """
