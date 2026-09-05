@@ -40,14 +40,16 @@ from typing import Annotated, Any, Literal, TypedDict
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from pydantic import BaseModel, Field
+from langgraph.types import interrupt
+from pydantic import BaseModel, Field, ValidationError
 
 from guardrails import RateLimiter, input_guardrail, output_guardrail, tool_guardrail
 from safety import ExecutionGuard, SafetyStop, call_with_timeout
-from tools_legacy import TOOLS_BY_NAME
+from hitl import RISKY_TOOLS, is_valid_decision
+from tools_legacy import TOOLS_BY_NAME, BookingInput, book_hotel_operation_id
 from trajectory_logger import TrajectoryLogger
 
-AgentName = Literal["billing", "tech", "researcher", "general"]
+AgentName = Literal["billing", "tech", "researcher", "general", "approval_gate"]
 
 MAX_HANDOFFS = 1
 MAX_SUPERVISOR_VISITS = 8
@@ -259,13 +261,39 @@ _BUDGET_ALERT_THRESHOLD_EUR = 500.0
 _COST_PATTERN = re.compile(r":\s*([\d.]+)\s*EUR")
 
 
+_BOOKING_ACTION_KEYWORDS = ("забронюй", "забронювати", "оформи бронювання", "оформити бронювання")
+
+
 class DemoBillingPlanner:
     def invoke(self, goal: str) -> BillingPlan:
+        lower = goal.lower()
+        if any(k in lower for k in _BOOKING_ACTION_KEYWORDS):
+            # Явний намір забронювати -> ЗМІШАНИЙ план: спершу безпечний
+            # calculate_trip_cost (виконується одразу, без підтвердження),
+            # потім book_hotel (RISKY_TOOLS — виконавець зупиниться саме на
+            # цьому кроці для HITL, S09; approval_gate вирішить його долю).
+            # Синтетичні демо-параметри бронювання ("Усі бронювання
+            # синтетичні" — вимога плану).
+            city = _extract_city(goal, default="Париж")
+            days = _extract_days(goal, default=2)
+            steps = [
+                _encode_step("calculate_trip_cost", city=city, days=max(days, 1), travelers=1),
+                _encode_step(
+                    "book_hotel",
+                    hotel_name="Hotel Lumiere",
+                    check_in="2026-09-15",
+                    nights=max(days, 1),
+                    total_cost=280.0,
+                    currency="EUR",
+                ),
+            ]
+            return BillingPlan(goal=goal, steps=steps)
+
         city = _extract_city(goal, default="Париж")
         days = _extract_days(goal, default=3)
         travelers = _extract_travelers(goal)
         steps = [_encode_step("calculate_trip_cost", city=city, days=days, travelers=travelers)]
-        if any(k in goal.lower() for k in ("скасув", "поліс", "бронюв")):
+        if any(k in lower for k in ("скасув", "поліс", "бронюв")):
             steps.append(_encode_step("search_knowledge", query="політика скасування бронювання готелю"))
         return BillingPlan(goal=goal, steps=steps)
 
@@ -305,6 +333,7 @@ class BillingState(TypedDict, total=False):
     current_step: int
     results: list[str]
     completed: bool
+    pending_risky_step: dict[str, Any] | None  # S09: сигнал назовні, tool ще НЕ виконано
 
 
 class BillingAgent:
@@ -361,7 +390,7 @@ class BillingAgent:
         self.logger.log(
             "billing_planner", state["goal"], plan.model_dump(), duration_ms=duration_ms, agent_name="billing"
         )
-        return {"plan": plan.steps, "current_step": 0, "results": [], "completed": False}
+        return {"plan": plan.steps, "current_step": 0, "results": [], "completed": False, "pending_risky_step": None}
 
     async def _executor_node(self, state: BillingState) -> dict[str, Any]:
         index = state["current_step"]
@@ -369,6 +398,22 @@ class BillingAgent:
             return {"completed": True}
         self.guard.check_limits(index)
         name, arguments = _decode_step(state["plan"][index])
+
+        if name in RISKY_TOOLS:
+            # Ризикова дія (S09): НЕ виконуємо тут жодного dispatch. Billing
+            # завершує свій підграф і сигналізує pending_risky_step назовні
+            # — MASApp._billing_node перетворює це на pending_approval, а
+            # approval_gate ставить граф на паузу через interrupt() ДО
+            # будь-якого виклику tool.
+            self.logger.log(
+                "billing_executor_pending_approval",
+                state["plan"][index],
+                f"Очікує підтвердження людини: {name}",
+                tool_calls=[{"name": name, "args": arguments}],
+                agent_name="billing",
+            )
+            return {"completed": True, "pending_risky_step": {"name": name, "arguments": arguments}}
+
         self.guard.register_call(name, arguments)
         started = time.monotonic()
         try:
@@ -389,6 +434,12 @@ class BillingAgent:
         return {"current_step": number, "results": [*state["results"], f"Крок {number}: {result}"]}
 
     def _replanner_node(self, state: BillingState) -> dict[str, Any]:
+        # Виконавець уже позначив completed=True (звичайне завершення плану
+        # АБО очікування підтвердження ризикової дії, S09) — не запускаємо
+        # ще один зайвий (демо/LLM) виклик replanner, який міг би про це не
+        # знати й повернути "continue".
+        if state.get("completed"):
+            return {}
         context = {
             "goal": state["goal"],
             "plan": state["plan"],
@@ -416,12 +467,19 @@ class BillingAgent:
             return {"plan": updated}
         return {}
 
-    async def run(self, goal: str) -> tuple[list[str], list[str]]:
+    async def run(self, goal: str) -> tuple[list[str], list[str], dict[str, Any] | None]:
         self.guard.reset()
         final = await self.app.ainvoke(
-            {"goal": goal, "plan": [], "current_step": 0, "results": [], "completed": False}
+            {
+                "goal": goal,
+                "plan": [],
+                "current_step": 0,
+                "results": [],
+                "completed": False,
+                "pending_risky_step": None,
+            }
         )
-        return final["plan"], final["results"]
+        return final["plan"], final["results"], final.get("pending_risky_step")
 
 
 # --- tech: ReAct LLM -> tools -> LLM (з ДЗ1 agent.py) -----------------------
@@ -916,16 +974,25 @@ class MASApp:
         graph.add_node("tech", self._node("tech", self._tech_node))
         graph.add_node("researcher", self._node("researcher", self._researcher_node))
         graph.add_node("general", self._node("general", self._general_node))
+        graph.add_node("approval_gate", self._node("approval_gate", self._approval_gate_node))
         graph.add_edge(START, "supervisor")
         graph.add_conditional_edges(
             "supervisor",
             self._route_from_supervisor,
-            {"billing": "billing", "tech": "tech", "researcher": "researcher", "general": "general", END: END},
+            {
+                "billing": "billing",
+                "tech": "tech",
+                "researcher": "researcher",
+                "general": "general",
+                "approval_gate": "approval_gate",
+                END: END,
+            },
         )
         graph.add_edge("billing", "supervisor")
         graph.add_edge("tech", "supervisor")
         graph.add_edge("researcher", "supervisor")
         graph.add_edge("general", "supervisor")
+        graph.add_edge("approval_gate", "supervisor")
         return graph.compile(checkpointer=self.checkpointer, interrupt_after=self.interrupt_after)
 
     def _node(self, _name: str, fn: Any) -> Any:
@@ -1016,6 +1083,13 @@ class MASApp:
                 "messages": [AIMessage(content=message)],
             }
 
+        # Ризикова дія очікує підтвердження (S09) — маршрутизуємо ПРЯМО до
+        # approval_gate, без повторної LLM/keyword-класифікації (той самий
+        # принцип, що й для handoff нижче: явний контрольований стан
+        # переважає над router.decide).
+        if state.get("pending_approval"):
+            return {"current_agent": "approval_gate", "step_count": step_count}
+
         handoff = state.get("handoff_context")
         handoff_count = state.get("handoff_count", 0)
         if handoff and handoff_count < MAX_HANDOFFS:
@@ -1035,7 +1109,7 @@ class MASApp:
         handoff = state.get("handoff_context")
         goal = handoff["context"] if handoff else self._user_goal(state)
         try:
-            plan, results = await self.billing_agent.run(goal)
+            plan, results, pending_risky_step = await self.billing_agent.run(goal)
         except SafetyStop as exc:
             message = f"billing: безпечно зупинено ({exc})"
             return {
@@ -1044,6 +1118,30 @@ class MASApp:
                 "results": [message],
                 "messages": [AIMessage(content=message)],
             }
+
+        if pending_risky_step is not None:
+            # S09: НЕ completed — граф має пройти через approval_gate.
+            tool_name = pending_risky_step["name"]
+            args = pending_risky_step["arguments"]
+            operation_id = book_hotel_operation_id(**args) if tool_name == "book_hotel" else None
+            pending_approval = {
+                "agent_name": "billing",
+                "tool": tool_name,
+                "args": args,
+                "consequences": (
+                    "Ризикова дія з фінансовими наслідками (демонстраційне бронювання, синтетичні дані)."
+                ),
+                "operation_id": operation_id,
+            }
+            return {
+                "completed": False,
+                "plan": plan,
+                "results": results,
+                "pending_approval": pending_approval,
+                "messages": [AIMessage(content=f"Очікую підтвердження людини для {tool_name}...")],
+                "handoff_context": None,
+            }
+
         answer = "\n".join(results) if results else "Не вдалося опрацювати бюджетний запит."
         return {
             "completed": True,
@@ -1052,6 +1150,85 @@ class MASApp:
             "results": results,
             "messages": [AIMessage(content=answer)],
             "handoff_context": None,
+        }
+
+    async def _approval_gate_node(self, state: MASState) -> dict[str, Any]:
+        """HITL approval gate (S09): interrupt() ставить граф на паузу ДО
+        будь-якого виклику ризикового tool. Рішення надходить через
+        `Command(resume={"action": "approve"|"reject"|"edit", ...})` для
+        того самого thread_id (потребує checkpointer — `MASApp(checkpointer=...)`).
+        """
+        pending = state.get("pending_approval")
+        if not pending:
+            return {"completed": True}
+
+        decision = interrupt(
+            {
+                "message": "Підтвердіть ризикову дію перед виконанням.",
+                "agent_name": pending["agent_name"],
+                "tool": pending["tool"],
+                "args": pending["args"],
+                "consequences": pending["consequences"],
+                "operation_id": pending["operation_id"],
+            }
+        )
+
+        # Boolean approved=True (LLM міг би сам його підставити) НЕ є людським
+        # підтвердженням — приймаємо лише явний dict з дозволеною action.
+        if not is_valid_decision(decision):
+            message = "Некоректне рішення підтвердження — бронювання контрольовано відхилено."
+            self.logger.log("approval_gate_invalid_decision", pending, message, agent_name="billing")
+            return {
+                "completed": True,
+                "pending_approval": None,
+                "results": [message],
+                "messages": [AIMessage(content=message)],
+            }
+
+        tool_name = pending["tool"]
+        args = dict(pending["args"])
+        agent_name = pending["agent_name"]
+        action = decision["action"]
+
+        if action == "reject":
+            reason = decision.get("reason", "без пояснення")
+            message = f"Бронювання відхилено оператором: {reason}. Tool не виконувався."
+            self.logger.log("approval_gate_reject", pending, message, agent_name=agent_name)
+            return {
+                "completed": True,
+                "pending_approval": None,
+                "results": [message],
+                "messages": [AIMessage(content=message)],
+            }
+
+        if action == "edit":
+            edits = decision.get("args", {})
+            args.update(edits)
+            try:
+                validated = BookingInput(**args)
+            except ValidationError as exc:
+                message = f"Редагування невалідне — {exc}. Бронювання не виконано."
+                self.logger.log("approval_gate_invalid_edit", {**pending, "edits": edits}, message, agent_name=agent_name)
+                return {
+                    "completed": True,
+                    "pending_approval": None,
+                    "results": [message],
+                    "messages": [AIMessage(content=message)],
+                }
+            args = validated.model_dump()
+
+        # approve (з оригінальними чи відредагованими й перевалідованими args)
+        try:
+            tool_result = await self.dispatch_tool(tool_name, args, agent_name)
+            message = f"{tool_name}: {tool_result}"
+        except ToolDispatchError as exc:
+            message = str(exc)
+        self.logger.log(f"approval_gate_{action}", {**pending, "final_args": args}, message, agent_name=agent_name)
+        return {
+            "completed": True,
+            "pending_approval": None,
+            "results": [message],
+            "messages": [AIMessage(content=message)],
         }
 
     async def _tech_node(self, state: MASState) -> dict[str, Any]:

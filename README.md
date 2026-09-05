@@ -359,12 +359,114 @@ python -m pytest tests/test_guardrails.py tests/test_mas_guardrails.py -v
 
 Станом на S08: 83 тести (14 підтестів), усі проходять.
 
+## HITL for book_hotel (S09)
+
+`hitl.py` — `RISKY_TOOLS = {"book_hotel"}` і схема людського рішення
+(`is_valid_decision`); фактичний `approval_gate`-вузол графа —
+`MASApp._approval_gate_node` у `mas_langgraph.py` (там, де вже є
+`dispatch_tool`, `logger`, checkpointer — не окремий вільний node без
+доступу до цього контексту).
+
+### Mechanism
+
+1. `DemoBillingPlanner` розпізнає явний намір забронювати (напр.
+   "Забронюй готель на 15 вересня 2026 на 2 ночі") і будує **змішаний**
+   план: спершу безпечний `calculate_trip_cost` (виконується одразу), потім
+   `book_hotel` (`RISKY_TOOLS`).
+2. `BillingAgent._executor_node`, зустрівши крок з tool із `RISKY_TOOLS`,
+   **не виконує його** — жодного dispatch. Повертає `pending_risky_step`
+   назовні з billing-підграфа.
+3. `MASApp._billing_node` перетворює це на `pending_approval` (повні
+   `args`, `agent_name`, `consequences`, детермінований `operation_id` —
+   той самий ключ, що й ідемпотентність `book_hotel_core`, S02) і лишає
+   `completed=False`.
+4. `MASApp._supervisor_node` бачить `pending_approval` і маршрутизує ПРЯМО
+   до `approval_gate` — без повторної LLM/keyword-класифікації.
+5. `approval_gate` викликає `interrupt(payload)` — граф ставиться на паузу
+   (потребує `MASApp(checkpointer=...)`, той самий файловий
+   `AsyncSqliteSaver`, що й у S07). Рішення надходить через
+   `Command(resume={"action": "approve"|"reject"|"edit", ...})` для того
+   самого `thread_id`.
+
+Код до `interrupt()` (кроки 1–5, до самого виклику) не має side effects —
+LangGraph повторно виконує цей шлях при resume, і book_hotel там не
+викликається, доки немає explicit рішення. `book_hotel_core`'s
+ідемпотентність додатково захищає навіть якщо approve стався двічі
+(рестарт/replay).
+
+**Boolean `approved=True`, який LLM міг би сам згенерувати, НЕ приймається
+як підтвердження** — `is_valid_decision` розпізнає лише dict з `action`
+рівно одним із `{"approve", "reject", "edit"}`; будь-що інше (некоректна
+action, bare `True`, довільний рядок) → контрольована відмова, без
+мовчазного approve.
+
+### Three Scenarios (verified by demo script and tests)
+
+```bash
+python hitl.py approve        # інтерактивна демонстрація в одному процесі
+python hitl.py reject
+python hitl.py edit
+python hitl.py invalid-edit   # edit, що порушує BookingInput — відхилено
+
+python hitl.py pause          # процес А: лише дійти до interrupt(), завершитись
+python hitl.py resume approve # процес Б (НОВИЙ python-процес): відновити з того самого checkpoint
+```
+
+- **approve**: `book_hotel` виконується РІВНО один раз; `bookings.json`
+  переходить з 0 → 1 запису, `status: "confirmed"`.
+- **reject**: жодного booking side effect (`bookings.json` не
+  створюється); причина збережена в результаті.
+- **edit**: дозволені зміни (`nights`, `total_cost`) застосовуються,
+  **вся схема `BookingInput` перевалідовується заново** перед виконанням
+  — валідний edit створює змінений запис; невалідний edit (`nights=-1`)
+  не створює жодного запису.
+- **restart/replay**: пауза → новий процес (`python hitl.py resume`) →
+  resume; повторний resume (`ainvoke(None, ...)`) на вже завершеній сесії
+  не дублює booking.
+- **mixed safe/risky batch**: один план, два кроки — безпечний
+  (`calculate_trip_cost`) виконується одразу, ризиковий (`book_hotel`)
+  зупиняється на `interrupt()`; після approve обидва результати присутні.
+- **researcher не може `book_hotel`**: навіть якби якимось чином
+  опинився на цьому шляху — `tool_guardrail` (S08) у `dispatch_tool`
+  заборонив би виклик незалежно від HITL-рішення.
+
+### Blocked/denied examples
+
+```text
+interrupt payload (approve/reject/edit очікується):
+{
+  "message": "Підтвердіть ризикову дію перед виконанням.",
+  "agent_name": "billing", "tool": "book_hotel",
+  "args": {"hotel_name": "Hotel Lumiere", "check_in": "2026-09-15", "nights": 2, "total_cost": 280.0, "currency": "EUR"},
+  "consequences": "Ризикова дія з фінансовими наслідками (демонстраційне бронювання, синтетичні дані).",
+  "operation_id": "6822954490d271ba8be9b58cc6f2cb2a25b7f73f018a36399b1ca4e537fc7aac"
+}
+
+Command(resume={"approved": True})  # bare boolean — НЕ підтвердження
+→ Некоректне рішення підтвердження — бронювання контрольовано відхилено.
+
+Command(resume={"action": "edit", "args": {"nights": -1}})
+→ Редагування невалідне — 1 validation error for BookingInput: nights
+  Value error, Кількість ночей має бути від 1 до 30. Бронювання не виконано.
+
+dispatch_tool("book_hotel", {...}, agent_name="researcher")
+→ ToolDispatchError: Guardrail: агенту 'researcher' заборонено викликати tool 'book_hotel'.
+```
+
+```bash
+python -m pytest tests/test_hitl.py -v
+```
+
+Станом на S09: 98 тестів (18 підтестів), усі проходять; 4 з них
+(`HitlCLICrossProcessTests`) реально запускають `hitl.py` як окремий
+subprocess (включно з переходом pause→новий процес→resume).
+
 ## Status
 
 Виконано: S01–S07 (базовий рівень: репозиторій, перевикористані
 компоненти, MCP-сервер і тести, LangGraph MAS, реальна MCP-інтеграція,
-durable state — до 65 балів), S08 (чотири рівні guardrails: input/output/
-tool/rate-limit, інтегровані в MAS execution path). Наступний крок — S09
-(HITL для ризикового MCP-tool `book_hotel` через `interrupt()`/
-`Command(resume=...)`) за планом
+durable state — до 65 балів), S08 (чотири рівні guardrails, до 80
+балів), S09 (HITL для ризикового MCP-tool `book_hotel`: interrupt()/
+Command(resume=...) з файловим SqliteSaver). Це завершує просунутий
+рівень. Наступний крок — S10 (observability: LangSmith/Langfuse) за планом
 `claude_plan/`.

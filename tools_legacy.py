@@ -242,6 +242,20 @@ def _idempotency_key(hotel_name: str, check_in: str, nights: int, total_cost: fl
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def book_hotel_operation_id(hotel_name: str, check_in: str, nights: int, total_cost: float, currency: str = "EUR") -> str:
+    """Публічна обгортка над `_idempotency_key` — той самий ключ, який
+    `book_hotel_core` використовує для дедуплікації, тепер обчислюваний
+    ДО виконання дії. Потрібен для HITL (S09): показати людині operation ID
+    у payload `interrupt()` ще до фактичного виклику tool, щоб approve на
+    той самий ID завжди відповідав тому самому бронюванню (чи вже
+    існуючому запису після replay/resume).
+    """
+    validated = BookingInput(hotel_name=hotel_name, check_in=check_in, nights=nights, total_cost=total_cost, currency=currency)
+    return _idempotency_key(
+        validated.hotel_name, validated.check_in, validated.nights, validated.total_cost, validated.currency
+    )
+
+
 def _load_bookings() -> list[dict]:
     if _booking_path.exists():
         return json.loads(_booking_path.read_text(encoding="utf-8"))
