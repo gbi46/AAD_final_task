@@ -473,6 +473,99 @@ python -m pytest tests/test_hitl.py -v
 (`HitlCLICrossProcessTests`) реально запускають `hitl.py` як окремий
 subprocess (включно з переходом pause→новий процес→resume).
 
+## Observability (S10)
+
+`observability.py` — конфігурація LangSmith виключно через environment
+(`is_tracing_enabled`, `configure_observability`, `project_url`). Без
+`LANGSMITH_API_KEY` трасування ЯВНО вимикається (`LANGCHAIN_TRACING_V2=false`,
+попередження у stderr) — решта MAS працює без жодної зміни поведінки, це
+не silent no-op SDK за замовчуванням, а явний контрольований стан.
+
+LangChain/LangGraph самі трасують кожен `Runnable.invoke()` (LLM-виклики,
+structured output, tool calls, вкладені підграфи) щойно tracing увімкнено —
+жодного додаткового коду для базової ієрархії run'ів не знадобилось. Єдина
+знахідка: `safety.call_with_timeout()` виконує кожен live LLM-виклик у
+`ThreadPoolExecutor`-потоці для реального тайм-ауту (S05); на відміну від
+`asyncio`-виконавця, сирий `ThreadPoolExecutor.submit()` НЕ копіює
+`contextvars.Context` автоматично, а саме через contextvars LangSmith визначає
+батьківський run — без явного `ctx = contextvars.copy_context(); ctx.run(...)`
+кожен LLM-виклик спливав окремим root run з 0 токенів на справжніх вузлах
+графа. Виправлено в `safety.py` (одним рядком навколо `executor.submit`).
+
+### Trace hierarchy (реальний, перевірений SDK)
+
+Два live-запити через `provider="openrouter"` (Claude Sonnet 4.6),
+`python observability.py`:
+
+**Запит 1** — «Скільки коштуватиме подорож до Парижа на 3 дні для двох?»
+(без handoff, лише billing): total_tokens=6493, latency=12.47s.
+
+**Запит 2** — «Яка погода у Львові і скільки коштуватиме подорож на 3 дні?»
+(tech → billing, реальний handoff, `handoff_count: 1`): total_tokens=9038,
+latency=26.29s. Точна ієрархія run'ів (з `client.list_runs(trace_id=...)`):
+
+```text
+LangGraph                                    tokens=9038  (root, thread_id=obs-handoff)
+  supervisor                                 tokens=1103
+    RunnableSequence → ChatOpenAI            tokens=1103  (RouteDecision: action=tech)
+    _route_from_supervisor
+  tech                                       tokens=2598
+    LangGraph (nested subgraph)
+      agent → ChatOpenAI                     tokens=1035  (рішення викликати tool)
+      tools → get_weather                    tokens=0     (реальний tool call)
+      agent → ChatOpenAI                     tokens=1563  (фінальна відповідь tech)
+  supervisor                                 tokens=0     (handoff: без повторної LLM-класифікації)
+    _route_from_supervisor                                → action=billing
+  billing                                    tokens=5337
+    LangGraph (nested subgraph)
+      planner → ChatOpenAI                   tokens=1511
+      executor → search_knowledge (tool)     tokens=0
+      replanner → ChatOpenAI                 tokens=1866
+      executor → calculate_trip_cost (tool)  tokens=0
+      replanner → ChatOpenAI                 tokens=1960
+  supervisor                                 tokens=0     (фінальний маршрут)
+```
+
+Це відповідає структурі MAS-графа (S05/S06): root run → supervisor →
+specialist (з вкладеним підграфом планувальника/виконавця чи ReAct-циклу
+tool-виклику) → повторний supervisor при handoff → другий specialist,
+усе прив'язане до одного `thread_id`/`run_id` (тут: `obs-handoff`).
+
+### Trace links
+
+- Запит 1 (billing, без handoff, 6493 токени, 12.47s):
+  https://smith.langchain.com/o/7d1cdab8-d9f4-4f98-b71e-5dab3d437da5/projects/p/157b2dab-bf4d-45ea-997f-8d2eadb07588/r/01a07270-e048-7780-a6c3-aae323b08d68
+- Запит 2 (tech→billing, реальний handoff, 9038 токенів, 26.29s):
+  https://smith.langchain.com/o/7d1cdab8-d9f4-4f98-b71e-5dab3d437da5/projects/p/157b2dab-bf4d-45ea-997f-8d2eadb07588/r/01a07271-1104-7e00-b26e-dd233c63377a
+
+Посилання ведуть у приватний LangSmith-проєкт власника (`aad-final-mas`) —
+відкриються лише після входу у той самий акаунт; ієрархія/токени/handoff
+вище отримані напряму з `langsmith` SDK (`client.list_runs`), не вигадані.
+
+![LangSmith trace: tech→billing handoff](docs/assets/langsmith-handoff-trace.png)
+
+### Секрети й PII
+
+Секрети (`.env`) ніколи не потрапляють у жоден prompt/tool-аргумент —
+LangSmith і не побачить те, чого немає у `Runnable.invoke()`. Синтетичні
+PII, потрібні для red-team перевірок (S12, RT-02): **чесне застереження**
+— `output_guardrail` (S08) маскує PII на рівні agent-вузла графа
+(`MASApp._apply_output_guardrail`), а LangSmith трасує сирі prompt/response
+callback'и LLM-клієнта НИЖЧЕ цього рівня — тобто до маскування. Повний
+захист вимагав би окремого LangChain callback/masking hook на рівні самого
+tracer'а, якого тут немає. Тому: обидва live-запити вище навмисно НЕ
+містять PII (лише туристичні дані), а red-team сценарії з PII (S12)
+запускаються з вимкненим LangSmith tracing, щоб синтетичні тестові PII не
+потрапляли до стороннього сервісу. Прогалина задокументована відкрито, не
+приховується — розбір у S13 (OWASP ASI matrix).
+
+### Reproduce
+
+```bash
+# .env: LANGSMITH_TRACING=true, LANGSMITH_API_KEY=..., LANGSMITH_PROJECT=aad-final-mas
+python observability.py
+```
+
 ## Status
 
 Виконано: S01–S07 (базовий рівень: репозиторій, перевикористані
@@ -480,5 +573,7 @@ subprocess (включно з переходом pause→новий процес
 durable state — до 65 балів), S08 (чотири рівні guardrails, до 80
 балів), S09 (HITL для ризикового MCP-tool `book_hotel`: interrupt()/
 Command(resume=...) з файловим SqliteSaver). Це завершує просунутий
-рівень. Наступний крок — S10 (observability: LangSmith/Langfuse) за планом
+рівень. S10 (observability: LangSmith, реальна trace-ієрархія й handoff
+у 2 live-запитах через `provider="openrouter"`) — виконано, скріншот у
+`docs/assets/`. Наступний крок — S11 (scenario evals) за планом
 `claude_plan/`.

@@ -16,6 +16,7 @@ LLM-запиту, що ніколи не повертається). `call_with_t
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 import hashlib
 import json
 import time
@@ -78,9 +79,18 @@ def call_with_timeout(
     який сам блокується до завершення того самого зависшого потоку і
     звів би нанівець весь сенс тайм-ауту. Тому shutdown викликається
     окремо з `wait=False`.
+
+    Контекст (S10): `ThreadPoolExecutor.submit()` сам по собі НЕ копіює
+    поточний `contextvars.Context` у робочий потік (на відміну від
+    `asyncio`-виконавця, який робить це автоматично) — LangSmith/LangChain
+    визначають батьківський run саме через contextvars, тому без явного
+    `ctx.run(...)` кожен LLM-виклик через цю функцію "губився" з дерева
+    trace графа й спливав окремим root run без кроків-предків (виявлено
+    емпірично при першій реальній перевірці S10 observability).
     """
+    ctx = contextvars.copy_context()
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(func, *args, **kwargs)
+    future = executor.submit(ctx.run, func, *args, **kwargs)
     try:
         return future.result(timeout=timeout_seconds)
     except concurrent.futures.TimeoutError as exc:
