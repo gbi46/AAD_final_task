@@ -213,8 +213,12 @@ def find_activities_core(city: str, interest: str) -> str:
 
 
 def search_knowledge_core(query: str, limit: int = 3) -> str:
-    documents = get_knowledge_base().search(query, limit=limit)
-    return "\n---\n".join(documents)
+    """Повертає документи з їхніми ID (`[travel-XX] текст ...`), щоб
+    відповідь можна було атрибутувати до конкретного джерела, а не просто
+    переказати текст без посилання.
+    """
+    pairs = get_knowledge_base().search_with_ids(query, limit=limit)
+    return "\n---\n".join(f"[{doc_id}] {text}" for doc_id, text in pairs)
 
 
 def _idempotency_key(hotel_name: str, check_in: str, nights: int, total_cost: float, currency: str) -> str:
@@ -323,7 +327,8 @@ def search_knowledge(query: str) -> str:
 
     Використовуйте для візових правил, транспорту, безпеки, сезонності,
     музеїв і рекомендацій. Не використовуйте для погоди, обчислень чи
-    бронювання. Повертає до трьох релевантних документів.
+    бронювання. Повертає до трьох релевантних документів з їхніми ID
+    (`[travel-XX] ...`), щоб відповідь можна було атрибутувати до джерела.
     """
     return search_knowledge_core(query, limit=3)
 

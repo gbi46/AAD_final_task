@@ -62,6 +62,7 @@ class ToolTests(unittest.TestCase):
     def test_agentic_rag_tool(self) -> None:
         result = search_knowledge.invoke({"query": "Коли зачинений Лувр?"})
         self.assertIn("Лувр", result)
+        self.assertIn("[travel-", result)  # ID документа для атрибуції джерела
         self.assertEqual(len(result.split("\n---\n")), 3)
         with self.assertRaisesRegex(ValidationError, "від 3 до 300"):
             KnowledgeInput(query="ок")

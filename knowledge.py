@@ -105,3 +105,13 @@ class KnowledgeBase:
         result = self.collection.query(query_texts=[query], n_results=min(limit, self.count))
         documents = result.get("documents") or [[]]
         return documents[0]
+
+    def search_with_ids(self, query: str, limit: int = 3) -> list[tuple[str, str]]:
+        """Те саме, що `search`, але разом з ID документа — потрібно, щоб
+        відповідь researcher-агента (S05) могла посилатися на конкретне
+        джерело, а не лише переказувати текст без атрибуції.
+        """
+        result = self.collection.query(query_texts=[query], n_results=min(limit, self.count))
+        ids = result.get("ids") or [[]]
+        documents = result.get("documents") or [[]]
+        return list(zip(ids[0], documents[0]))
