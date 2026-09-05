@@ -74,8 +74,44 @@ python -m pytest tests/ -v
 
 Станом на S02: 16 тестів (5 підтестів), усі проходять.
 
+## MCP-сервер (S03)
+
+`mcp_server.py` — транспортний шар над `tools_legacy.py`/`knowledge.py`
+через офіційний MCP SDK (`mcp.server.fastmcp.FastMCP`, stdio entry point;
+не плутати з окремим пакетом `fastmcp` — API різняться).
+
+- **5 tools**: `get_weather`, `calculate_trip_cost`, `find_activities`,
+  `search_knowledge`, `book_hotel` — кожен повторно валідує аргументи тими
+  самими Pydantic-схемами з `tools_legacy.py` (сервер не довіряє
+  клієнтській валідації) і викликає спільну `*_core`-функцію.
+- **2 read-only resources**: `faq://general` (статичний туристичний FAQ,
+  без RAG-пошуку) та `travel://cities` (каталог підтримуваних міст із
+  демонстраційними даними CITY_DATA).
+- **1 prompt**: `travel_reply(traveler_name, issue_summary, tone)` —
+  повертає текстовий шаблон із підставленими параметрами (не готову
+  вигадану LLM-відповідь); `tone` валідується як один із трьох варіантів.
+- Логи йдуть у stderr (`logging.basicConfig(..., stream=sys.stderr)`),
+  stdout лишається виключно протоколу. Шляхи сховищ — `MCP_KNOWLEDGE_PATH`
+  / `MCP_BOOKING_PATH` (типово відносно розташування самого файлу, не cwd
+  процесу, що його запустив).
+- Невалідні аргументи, невідоме місто чи збій ChromaDB підіймають
+  `ValueError`/`RuntimeError`, які MCP перетворює на
+  `CallToolResult(isError=True, ...)` — перевірено як напряму, так і через
+  повний stdio-протокол (`ClientSession` у окремому subprocess): успішний
+  виклик має `isError=False`, невалідний — `isError=True` з описом
+  причини, storage не змінюється.
+
+### Запуск сервера
+
+```bash
+python mcp_server.py
+```
+
+Для ручної перевірки: `npx @modelcontextprotocol/inspector python mcp_server.py`.
+
 ## Статус
 
 Виконано: S01 (репозиторій та середовище), S02 (перевикористані
-компоненти й контракти). Наступний крок — S03 (MCP-сервер) за планом
+компоненти й контракти), S03 (MCP-сервер: tools, resources, prompt).
+Наступний крок — S04 (unit-тести MCP через async client) за планом
 `claude_plan/`.
