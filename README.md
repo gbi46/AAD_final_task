@@ -1081,6 +1081,68 @@ python compare_frameworks.py crewai     # лише CrewAI (підпроцес .v
 python count_loc.py
 ```
 
+## Validation Summary (S17)
+
+**Незалежна перевірка (`../codex_review/`) — статус `NOT_RUN`.** Ця
+директорія (поза цим репозиторієм, не пушиться разом із ним) підготовлена
+для незалежної перевірки за повною поелементною матрицею
+(`REQUIREMENTS.md`, `review_results.json`), але сам запуск такої
+перевірки — платна, явно ініційована власником дія (`/code-review
+ultra`), яку асистент не може виконати самостійно. За проханням власника
+S17 завершується БЕЗ неї — нижче зведення того, що РЕАЛЬНО перевірено
+(само-верифікація автора реалізації протягом S01–S16), чесно позначене як
+таке, а не як незалежний вердикт.
+
+**Що перевірено (усе — фактичні прогони, не оцінки):**
+
+| Перевірка | Результат |
+|---|---|
+| Повний regression suite (`pytest tests/`) | **121 passed, 4 skipped, 48 підтестів** (4 skip — CrewAI-специфічні тести, потребують `.venv-crewai`) |
+| CrewAI-специфічні тести (`.venv-crewai`) | **5 passed, 1 skipped** (1 skip — опційний живий тест, `RUN_LIVE_CREWAI=1`) |
+| Clean-checkout (S16): `git clone` у `/tmp`, чистий `.venv`, без доступу до сусідніх `prepare/` джерел | Ідентичний результат regression suite; усі demo-команди з README (`guardrails.py`, `evals.py`, `red_team.py`, `persistence_demo.py`, `hitl.py`, `mcp_server.py`) відпрацювали коректно |
+| `pip check` (обидва `requirements.txt`/`requirements-crewai.txt`, чисті venv) | "No broken requirements found" |
+| Секрети/абсолютні шляхи/вкладені `.git`/venv — tracked файли І повна `git log --all` історія | Жодного знайденого патерну |
+| `PRAGMA integrity_check` — `agent_state.db`, `chroma_db/chroma.sqlite3` | `ok` |
+| `eval_results.json` (S11, `--mode demo`) | 5/5 pass |
+| `red_team_results.json` (S12, `--mode demo`) | 7/7 захисних механізмів протримались, 0 bypass |
+| `comparison_results.json` (S15) | 8 реальних live LLM-запитів (обидва фреймворки), включно з чесно задокументованим routing-miss (EVAL-04, LangGraph) |
+| LangSmith traces (S10) | 2 реальні live-запити, скріншот у `docs/assets/` |
+| `git status --short` / `git diff --check` | Порожньо / без помилок (тести не лишають tracked змін) |
+
+**Знайдені й виправлені під час самої верифікації (не приховані):**
+контекстний баг `ThreadPoolExecutor`/LangSmith (S10), баг зіставлення
+токенів за часовим вікном замість `thread_id` (S15), баг делегування
+CrewAI через `Task(agent=...)` (S14), тест, що неявно залежав від
+реального API-ключа (S16) — кожен задокументований у відповідному розділі
+вище з першопричиною, не лише фактом виправлення.
+
+**Не перевірено незалежно:** відповідність усій поелементній матриці
+`codex_review/REQUIREMENTS.md` (це і є мета майбутнього `/code-review
+ultra`); крос-платформна сумісність поза цим Linux/Python 3.12
+середовищем; live-прогін red-team RT-сценаріїв (S12 запускався лише
+`--mode demo` — `--mode live` підтримується кодом, але не був потрібен
+для приймання).
+
+### Git Hygiene and Handoff
+
+- `git status --short` — порожньо. `git diff --check` — без помилок
+  (whitespace). Гілка — `main`. Фінальний SHA:
+  **`b88cda1a5c2e39530b79034af7d5d826757fcf97`**.
+- Remote `origin` (`gbi46:gbi46/AAD_final_task.git`) вже налаштований
+  (не створювався цією сесією) і доступний (`git ls-remote origin`
+  відповідає без помилки), але **порожній — жодного коміту ще не
+  запушено**. План прямо забороняє пуш без окремої авторизації власника,
+  тому це свідомо НЕ виконано.
+- **Наступний ручний крок для власника** (не виконаний факт, а
+  інструкція): `git push -u origin main` — якщо `origin` колись зміниться
+  чи знадобиться інший remote: `git remote set-url origin <URL>` (чи
+  `git remote add origin <URL>` для нового).
+- Архів `HW3_Kravchuk.zip` (додатковий формат здачі, GitHub repo —
+  основний) — НЕ створювався в цій сесії; за потреби:
+  `git archive --format=zip -o HW3_Kravchuk.zip HEAD` (з фінального
+  tracked дерева, без підготовчих пакетів; перевірити ліміт платформи
+  150 МБ перед відправкою).
+
 ## Status
 
 Виконано: S01–S07 (базовий рівень: репозиторій, перевикористані
@@ -1099,5 +1161,10 @@ CrewAI, `mas_crewai.py`, реальний MCP subprocess, per-agent tool
 permissions, живий прогін через `provider="openrouter"`) — виконано.
 S15 (fair comparison: обидва фреймворки live на EVAL-01..04, той самий
 модель/temperature, `comparison_results.json` + LOC + аналіз) — виконано,
-це завершує Bonus Level (S14-S15). Наступний крок — S16 (reproducible
-submission) за планом `claude_plan/06_DELIVERY.md`.
+це завершує Bonus Level (S14-S15). S16 (reproducible submission:
+Architecture-розділ з графом, перегенеровані контрольні артефакти на
+синтетичних даних, чистий clean-checkout прогін, сканування секретів) —
+виконано. S17 (review fixes and handoff) — незалежна перевірка Codex не
+запускалась (user-triggered/платна дія, за проханням власника відкладена
+на майбутнє); завершено чесним validation summary й git handoff-нотатками
+вище. Це завершує ВЕСЬ план (S01–S17).
