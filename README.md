@@ -34,6 +34,13 @@ Plan-and-Execute, ChromaDB RAG, TrajectoryLogger, ExecutionGuard) — детал
   для нових ключів (перевірено емпірично: `gemini-2.5-flash`/
   `gemini-2.5-flash-lite` повертають 404 для цього ключа, `-latest` і
   `gemini-3.6-flash` — робочі).
+- **Альтернативний live-шлях — OpenRouter** (`provider="openrouter"`,
+  `OPENROUTER_MODEL`/`OPENROUTER_API_KEY` у `.env`): один OpenAI-сумісний
+  ендпоінт до тієї самої рекомендованої моделі (за замовчуванням Claude
+  Sonnet 4.6), корисно, коли пряма квота Gemini вичерпана чи прямого
+  ключа немає. `ChatGoogleGenerativeAI` і `ChatOpenAI` реалізують той
+  самий інтерфейс LangChain, тому решта коду однакова для обох шляхів —
+  агенти перевіряють лише `provider != "demo"`.
 
 ### Installation
 
