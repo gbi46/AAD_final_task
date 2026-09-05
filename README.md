@@ -27,8 +27,13 @@ Plan-and-Execute, ChromaDB RAG, TrajectoryLogger, ExecutionGuard) — детал
 
 - Python 3.12 (перевірено; сумісний діапазон 3.11–3.12).
 - Один LLM-провайдер обирається через змінну середовища `LLM_PROVIDER`
-  (за замовчуванням `gemini`, `GEMINI_MODEL=gemini-2.5-flash`) — див.
-  `.env.example`. Модель не хардкодиться в коді.
+  (за замовчуванням `gemini`, `GEMINI_MODEL=gemini-flash-latest`) — див.
+  `.env.example`. Модель не хардкодиться в коді (`os.getenv("GEMINI_MODEL", ...)`,
+  S10) — `-latest`-псевдонім сам вказує на актуальну рекомендовану
+  flash-модель, оскільки конкретні версійні імена з часом деприкейтяться
+  для нових ключів (перевірено емпірично: `gemini-2.5-flash`/
+  `gemini-2.5-flash-lite` повертають 404 для цього ключа, `-latest` і
+  `gemini-3.6-flash` — робочі).
 
 ### Installation
 

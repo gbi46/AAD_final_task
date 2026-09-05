@@ -209,7 +209,13 @@ class DemoSupervisorRouter:
 class LiveSupervisorRouter:
     """Live-маршрутизатор: `with_structured_output(RouteDecision)` з фолбеком."""
 
-    def __init__(self, llm: Any, timeout_seconds: float = 20.0):
+    def __init__(self, llm: Any, timeout_seconds: float = 30.0):
+        # 30 с (не 20 с) — на живих викликах Gemini з цього середовища
+        # спостерігалася latency, що подекуди перевищувала 15–20 с навіть
+        # для простого одноходового виклику; надто короткий тайм-аут
+        # призводив до частих (хибних із зовнішнього вигляду "невірна
+        # маршрутизація") фолбеків на general через невдалий structured
+        # output, а не через справжнє рішення LLM.
         self.model = llm.with_structured_output(RouteDecision)
         self.timeout_seconds = timeout_seconds
 
@@ -779,7 +785,11 @@ class GeneralAgent:
                 "Ти — привітний туристичний асистент. Дай коротку відповідь або постав "
                 "уточнююче питання. НЕ використовуй жодних tools.\n" + goal
             )
-            response = call_with_timeout(self.llm.invoke, 15.0, prompt)
+            # 30 с, узгоджено з ExecutionGuard.timeout_seconds billing/tech
+            # (раніше 15 с — зависокий поріг для спостереженої live-latency
+            # Gemini, і до того ж _general_node не ловив SafetyStop, тому
+            # такий тайм-аут валив увесь запуск; обидва виправлено разом).
+            response = call_with_timeout(self.llm.invoke, 30.0, prompt)
             answer = _message_text(response)
         else:
             answer = (
@@ -828,7 +838,15 @@ class MASApp:
                 raise ValueError("Для режиму gemini задайте змінну GOOGLE_API_KEY")
             from langchain_google_genai import ChatGoogleGenerativeAI
 
-            self.llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)
+            # Модель — зі змінної середовища, НЕ хардкод (task.txt: "модель
+            # задається змінною"). gemini-flash-latest — псевдонім, що сам
+            # вказує на актуальну рекомендовану flash-модель: конкретні
+            # версійні імена (напр. gemini-2.5-flash) з часом деприкейтяться
+            # для нових ключів — перевірено емпірично на реальному ключі
+            # (2.5-flash/2.5-flash-lite повернули 404 NOT_FOUND, latest-псевдонім
+            # і gemini-3.6-flash — робочі).
+            model_name = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+            self.llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.1)
             self.router: Any = LiveSupervisorRouter(self.llm)
         else:
             self.router = DemoSupervisorRouter()
@@ -1260,7 +1278,15 @@ class MASApp:
 
     async def _general_node(self, state: MASState) -> dict[str, Any]:
         goal = self._user_goal(state)
-        answer = await self.general_agent.run(goal)
+        try:
+            answer = await self.general_agent.run(goal)
+        except SafetyStop as exc:
+            # general — єдиний з чотирьох вузлів, який НЕ ловив SafetyStop
+            # (billing/tech/researcher завжди ловили) — на живому виклику з
+            # реальною (варіативною) latency до Gemini необроблений
+            # SafetyStop валив увесь ainvoke замість контрольованої відповіді.
+            message = f"general: безпечно зупинено ({exc})"
+            return {"completed": True, "results": [message], "messages": [AIMessage(content=message)]}
         return {"completed": True, "results": [f"general: {answer}"], "messages": [AIMessage(content=answer)]}
 
     # -- публічний вхід --------------------------------------------------------
