@@ -1,5 +1,9 @@
 # Віртуальне середовище та кеші Python
 .venv/
+# S14: crewai має несумісні pinned-версії з основним requirements.txt
+# (понижує chromadb/mcp/pydantic) -- окремий ізольований venv, той самий
+# підхід, що й основний .venv (S01), лише не той самий каталог.
+.venv-crewai/
 __pycache__/
 *.pyc
 .pytest_cache/

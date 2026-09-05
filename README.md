@@ -756,6 +756,111 @@ traces, scoped tokens тощо), яких тут немає.
    lockfile з хешами (`pip-compile --generate-hashes`) чи SBOM+сканування
    вразливостей у CI.
 
+## Equivalent MAS in CrewAI (S14, Bonus Level)
+
+`mas_crewai.py` — той самий домен/кейс, що й `mas_langgraph.py` (S05+):
+billing (бюджет), tech (погода/активності), researcher (туристичні
+правила/FAQ через RAG), з coordinator (`manager_agent`), що делегує в
+hierarchical crew (`Process.hierarchical`). `general` тут не потрібен —
+план прямо вимагає лише "трьома тими самими спеціалістами billing, tech,
+researcher і coordinator".
+
+**Справжній MCP subprocess, не локальні wrappers**: підключено до ТОГО
+САМОГО `mcp_server.py` через `crewai_tools.MCPServerAdapter` (stdio) —
+план прямо забороняє замінювати це локальними Python-обгортками
+(попередній довідковий приклад `AAD_practical_task-2/mas_crewai.py` якраз
+використовує локальні обгортки над payload-функціями, без MCP-протоколу —
+свідомо НЕ відтворено тут, лише роль/hierarchical-архітектура запозичена).
+
+**Per-agent tool permissions** (дзеркалить `guardrails.TOOL_PERMISSIONS`,
+S08): кожен спеціаліст отримує ОКРЕМИЙ `MCPServerAdapter(params,
+*allowed_tool_names)` — сам адаптер фільтрує список tools за іменами
+(перевірено емпірично: `tests/test_mas_crewai.py::
+test_per_agent_tool_filtering_via_real_mcp_subprocess`). `book_hotel`
+НАВМИСНО не переданий ЖОДНОМУ агенту: CrewAI (на відміну від LangGraph,
+S09) не має вбудованого `interrupt()`/`Command(resume=...)` для паузи під
+час kickoff — чесний вибір тут: не давати ризиковий tool без реального
+HITL-механізму, а не імітувати підтвердження, якого немає (план: "Ризикові
+дії не запускати непідтвердженими").
+
+### Isolated environment
+
+`crewai`/`crewai-tools` тягнуть pinned-версії, що конфліктують з основним
+`requirements.txt` (перевірено `pip install --dry-run`: понижує chromadb
+1.5.9→1.1.1, mcp 1.29.1→1.28.1, pydantic 2.13.5→2.12.5). Тому — окремий
+venv:
+
+```bash
+python3 -m virtualenv .venv-crewai
+.venv-crewai/bin/pip install -r requirements-crewai.txt
+```
+
+MCP-сервер (`mcp_server.py`) все одно запускається дочірнім процесом через
+`.venv/bin/python` (ГОЛОВНИЙ venv, ті самі pinned версії, що й уся решта
+MAS) — `.venv-crewai` містить лише CrewAI-клієнта, що говорить
+MCP-протоколом (сумісний між мінорними версіями `mcp`), а не бізнес-логіку
+сервера.
+
+### Знайдені під час першого live-прогону баги (обидва виправлено)
+
+1. **`Task(agent=coordinator)` ламає делегування**: у CrewAI 1.15.20
+   `Crew._update_manager_tools` будує delegation tools з `[task.agent]`
+   замість `self.agents`, коли `task.agent` заданий явно — менеджер бачив
+   ЛИШЕ самого себе як "коворкера" і падав з `RuntimeError: Executor is
+   already running. Cannot invoke the same executor instance
+   concurrently.` Виправлено: `agent=` на `Task` НЕ вказується —
+   `Process.hierarchical` сам призначає `manager_agent` виконавцем і
+   коректно пропонує ЙОМУ делегувати на `billing_agent`/`tech_agent`/
+   `researcher_agent`.
+2. **OpenRouter `max_tokens=65536` за замовчуванням** — той самий баг, що
+   й у `mas_langgraph.MASApp._build_llm` (pre-S10): `openai.APIStatusError:
+   402 "requires more credits"`. Виправлено: `LLM(model=..., max_tokens=
+   int(os.getenv("OPENROUTER_MAX_TOKENS", "4096")))` замість голого
+   рядка моделі.
+
+### Verified live (provider = openrouter, той самий `OPENROUTER_MODEL`)
+
+Усі три спеціалісти перевірено окремими живими запитами — реальна
+делегація й реальний MCP-виклик у кожному:
+
+```text
+"Скільки коштуватиме подорож до Львова на 3 дні для двох?"
+  -> delegate_work_to_coworker(coworker="Billing Specialist")
+  -> calculate_trip_cost(city="Львів", days=3, travelers=2)
+  -> "Орієнтовний бюджет для Львів: 312 EUR (3 дн., 2 ос.)."
+
+"Яка погода у Львові і чим зайнятись, якщо цікавить культура?"
+  -> delegate -> Tech & Logistics Specialist
+  -> get_weather(city="Львів", days=1) + find_activities(city="Львів", interest="культура")
+
+"Які правила відвідування Лувру?"
+  -> delegate -> Travel Rules Researcher
+  -> search_knowledge(...) (8 викликів — модель уточнювала запит; фінальна
+     відповідь коректно синтезує travel-01/03/04/09/10)
+```
+
+`book_hotel` не з'являється в жодному з прогонів (перевірено grep по
+логах) — недоступний фізично, не лише заборонений post-hoc.
+
+**Чесна відмінність від LangGraph-версії** (важливо для S15): coordinator
+у CrewAI ПЕРЕФОРМУЛЬОВУЄ делеговану відповідь власними словами (часто
+округлює/перекладає у грн), а не передає точний рядок tool-результату так,
+як `mas_langgraph.py`'s `results` (S05, `operator.add` reducer над точними
+рядками кроків). Обчислення в billing-агента БУЛО коректним (312 EUR
+підтверджено в проміжному виводі спеціаліста), але фінальний текст
+користувачу не завжди дослівно цитує це число. Це реальна, виміряна
+відмінність у fidelity/precision між фреймворками, не баг тестів.
+
+```bash
+.venv-crewai/bin/python mas_crewai.py "Скільки коштуватиме подорож до Львова на 3 дні для двох?"
+.venv-crewai/bin/python -m pytest tests/test_mas_crewai.py -v        # без live LLM (швидко, безкоштовно)
+RUN_LIVE_CREWAI=1 .venv-crewai/bin/python -m pytest tests/test_mas_crewai.py -v  # +1 живий тест
+```
+
+Під основним `.venv` ці тести автоматично `SKIPPED` (не `FAILED`) —
+`crewai` там не встановлено навмисно; звичайний `pytest tests/` лишається
+зеленим без жодної зміни поведінки.
+
 ## Status
 
 Виконано: S01–S07 (базовий рівень: репозиторій, перевикористані
@@ -769,5 +874,8 @@ Command(resume=...) з файловим SqliteSaver). Це завершує пр
 виконано. S12 (7 red-team сценаріїв RT-01..07, 7/7 захисних механізмів
 протримались) — виконано. S13 (повна OWASP ASI01–ASI10 матриця +
 Residual Risks, спираючись на виміряні докази S08–S12) — виконано. Це
-завершує рівень Expert (S10–S13). Наступний крок — S14 (еквівалентна MAS
-у CrewAI/AutoGen) за планом `claude_plan/`.
+завершує рівень Expert (S10–S13). S14 (Bonus Level: еквівалентна MAS у
+CrewAI, `mas_crewai.py`, реальний MCP subprocess, per-agent tool
+permissions, живий прогін через `provider="openrouter"`) — виконано.
+Наступний крок — S15 (fair comparison LangGraph vs CrewAI) за планом
+`claude_plan/05_BONUS.md`.
