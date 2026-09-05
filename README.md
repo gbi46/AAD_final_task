@@ -109,9 +109,34 @@ python mcp_server.py
 
 Для ручної перевірки: `npx @modelcontextprotocol/inspector python mcp_server.py`.
 
+## MCP-тести (S04)
+
+`tests/test_mcp_server.py` — 13 async-тестів через справжній MCP client
+API (`mcp.ClientSession` + `mcp.client.stdio.stdio_client`), а не прямі
+виклики Python-функцій: кожен тест піднімає `mcp_server.py` як окремий
+subprocess з ізольованим tempdir-сховищем (`tmp_path`) і перевіряє
+transport-шар разом із бізнес-логікою.
+
+Покриття: `list_tools` (точний набір і схеми, включно з required/default),
+`get_weather`/`calculate_trip_cost` на fixtures, `find_activities` і
+`search_knowledge` (document IDs у відповіді), невалідні `city`/`days`/
+booking-параметри (помилка, storage не змінюється), ідемпотентність
+`book_hotel` (повтор не дублює запис), `list_resources`/`read_resource`
+для обох URI (повторне читання не змінює вміст), `list_prompts`/
+`get_prompt` (шаблон, параметри, невалідний `tone` відхиляється), окремий
+stdio smoke-тест з `asyncio.wait_for(..., timeout=20)` — підтверджує
+відсутність зависання subprocess. Жоден тест не потребує LLM API-ключа.
+
+```bash
+python -m pytest tests/ -v         # усі тести, ~16 с (MCP-тести стартують subprocess)
+python -m pytest tests/test_mcp_server.py -v  # лише MCP
+```
+
+Станом на S04: 29 тестів (5 підтестів), усі проходять.
+
 ## Статус
 
 Виконано: S01 (репозиторій та середовище), S02 (перевикористані
-компоненти й контракти), S03 (MCP-сервер: tools, resources, prompt).
-Наступний крок — S04 (unit-тести MCP через async client) за планом
-`claude_plan/`.
+компоненти й контракти), S03 (MCP-сервер: tools, resources, prompt), S04
+(MCP-тести через async client). Наступний крок — S05 (LangGraph
+supervisor і агенти) за планом `claude_plan/`.
