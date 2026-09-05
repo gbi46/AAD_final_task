@@ -2,9 +2,9 @@
 
 Фінальне домашнє завдання курсу: production-подібна мультиагентна система (MAS)
 на LangGraph з MCP-сервером, guardrails, HITL, observability, evals та
-red-teaming. Цей README поки описує лише підготовчий стан (S01 — репозиторій
-та середовище); архітектура MAS, MCP-сервер та інструкція запуску повного
-сценарію буде додана на наступних кроках.
+red-teaming. Базовий рівень (MAS + MCP) у розробці; підключення MCP до
+агентів, guardrails, HITL, observability/evals/red-team і бонусний рівень
+(CrewAI) буде додано на наступних кроках — див. розділ «Статус».
 
 ## Домен
 
@@ -134,9 +134,63 @@ python -m pytest tests/test_mcp_server.py -v  # лише MCP
 
 Станом на S04: 29 тестів (5 підтестів), усі проходять.
 
+## MAS у LangGraph (S05)
+
+`mas_langgraph.py` — supervisor-вузол маршрутизує запит між чотирма
+спеціалізованими агентами. Локальні валідовані wrappers з `tools_legacy.py`
+викликаються напряму; підключення того самого набору tools через MCP —
+окремий крок S06.
+
+- **Supervisor**: `RouteDecision(action, reasoning)` — live-режим викликає
+  `with_structured_output(RouteDecision)` з few-shot прикладами і фолбеком
+  на `general` при невалідному/зависшому structured output; demo-режим
+  (`DemoSupervisorRouter`) — детермінований, ключовими словами, але
+  проходить той самий граф. Маршрутизація читає `HumanMessage` (ціль
+  користувача) чи явний `handoff_context`, а не останнє `ToolMessage`.
+- **billing** — підграф `planner → executor → replanner`, перенесений і
+  адаптований з `Kravchuk_AAD_2/plan_execute.py` (без persistence/HITL —
+  це S07/S09; `book_hotel` тут не викликається автоматично). Реальний
+  replan: якщо орієнтовний бюджет перевищує 500 EUR, replanner додає крок
+  `search_knowledge` з порадами економії — план справді зростає з 1 до 2
+  кроків, це не позначка, а фактична зміна залишку плану.
+- **tech** — ReAct `agent → tools → agent`, перенесений і адаптований з
+  `Kravchuk_AAD_1/agent.py` (`get_weather`, `find_activities`). Детектор
+  повторюваних викликів (`ExecutionGuard.max_repeats`) контрольовано
+  зупиняє граф на сценарії "повторюй ...". Реальний handoff: якщо запит
+  також стосується бюджету, tech передає `handoff_context` — supervisor
+  на наступному візиті одразу маршрутизує до billing (без повторної
+  LLM-класифікації), обмежено `MAX_HANDOFFS=1`.
+- **researcher** — LLM (чи demo-евристика) вирішує, чи потрібен
+  `search_knowledge`; відповідь цитує ID документів (`[travel-XX]`).
+  Порівняння: довідковий запит (RAG потрібен) проти арифметичного
+  бюджетного запиту (RAG не потрібен) — різні гілки супервізора.
+- **general** — відповідь/уточнення без жодного tool-виклику.
+- **Бюджети**: per-agent `ExecutionGuard` (max_steps/timeout/max_repeats)
+  для billing/tech/researcher — обмежують і вкладені цикли всередині
+  підграфів, не лише зовнішній супервізорний цикл. Глобальний
+  `MAX_SUPERVISOR_VISITS=8` зупиняє граф навіть якщо конкретний агент
+  ніколи не встановлює `completed`. `safety.call_with_timeout` (новий у
+  S05) для LLM-викликів у live-режимі: на відміну від
+  `ExecutionGuard.check_limits()` (перевіряє час до/після виклику), тут
+  абонент дійсно перестає чекати на межі тайм-ауту, а не лише дізнається
+  про перевищення вже після того, як виклик сам завершився.
+- **Reducers стану**: `messages` — вбудований `add_messages` (дедуп за
+  id), `trajectory` — власний reducer, що додає нові кроки спільного
+  `TrajectoryLogger` без дублювання, `results` — накопичення
+  (`operator.add`), `plan` — явна заміна (без reducer, останній запис
+  перемагає).
+
+```bash
+python mas_langgraph.py   # demo-прогін 6 сценаріїв, зберігає runtime/trajectory_demo_s05.json
+python -m pytest tests/test_mas_langgraph.py -v
+```
+
+Станом на S05: 42 тести (5 підтестів), усі проходять.
+
 ## Статус
 
 Виконано: S01 (репозиторій та середовище), S02 (перевикористані
 компоненти й контракти), S03 (MCP-сервер: tools, resources, prompt), S04
-(MCP-тести через async client). Наступний крок — S05 (LangGraph
-supervisor і агенти) за планом `claude_plan/`.
+(MCP-тести через async client), S05 (LangGraph supervisor і
+спеціалізовані агенти billing/tech/researcher/general). Наступний крок —
+S06 (підключення MCP до агентів) за планом `claude_plan/`.

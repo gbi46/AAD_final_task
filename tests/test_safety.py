@@ -1,7 +1,8 @@
 """Тести захисних механізмів.
 
 Перенесено без змін з `Kravchuk_AAD_1/tests/test_safety.py`: ліміт кроків,
-тайм-аут, детектор повторюваних викликів (repeat limit).
+тайм-аут, детектор повторюваних викликів (repeat limit). `call_with_timeout`
+— новий для S05 (використовується агентами MAS у live-режимі).
 """
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ from __future__ import annotations
 import time
 import unittest
 
-from safety import ExecutionGuard, SafetyStop
+from safety import ExecutionGuard, SafetyStop, call_with_timeout
 
 
 class SafetyTests(unittest.TestCase):
@@ -30,6 +31,21 @@ class SafetyTests(unittest.TestCase):
         guard.register_call("get_weather", {"city": "Київ"})
         with self.assertRaisesRegex(SafetyStop, "цикл"):
             guard.register_call("get_weather", {"city": "Київ"})
+
+    def test_call_with_timeout_returns_result_when_fast_enough(self) -> None:
+        self.assertEqual(call_with_timeout(lambda: "ok", 5.0), "ok")
+
+    def test_call_with_timeout_stops_waiting_on_hanging_call(self) -> None:
+        def hangs() -> str:
+            time.sleep(2.0)
+            return "too-late"
+
+        started = time.monotonic()
+        with self.assertRaisesRegex(SafetyStop, "тайм-аут"):
+            call_with_timeout(hangs, 0.2)
+        elapsed = time.monotonic() - started
+        # Абонент повертає керування біля межі тайм-ауту, а не чекає всі 2 с.
+        self.assertLess(elapsed, 1.0)
 
 
 if __name__ == "__main__":
