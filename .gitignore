@@ -1,0 +1,18 @@
+# Віртуальне середовище та кеші Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Секрети — реальний файл ключів ніколи не комітиться, лише .env.example
+.env
+
+# Локальні runtime-сесії розробки (не контрольні артефакти здачі —
+# agent_state.db, chroma_db/, trajectory.json з кореня репозиторію
+# навмисно НЕ ігноруються, це обов'язкові артефакти здачі)
+runtime/
+
+.DS_Store
