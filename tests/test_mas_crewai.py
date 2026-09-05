@@ -89,6 +89,26 @@ class MCPConnectionTests(unittest.TestCase):
 
 @_skip_without_crewai
 class LLMConfigTests(unittest.TestCase):
+    """`crewai.LLM(model="openrouter/...")` валідує наявність (НЕ
+    справжність) `OPENROUTER_API_KEY` вже при самій побудові об'єкта — без
+    жодного ключа падає `pydantic.ValidationError` ще до будь-якого
+    мережевого виклику (виявлено емпірично, S16: тести падали в чистому
+    checkout без `.env`, хоча в дев-середовищі з реальним ключем
+    проходили мовчки). Тому кожен тест тут підставляє ФІКТИВНИЙ рядок
+    (не справжній секрет, жодного виклику мережі не відбувається) --
+    офлайн-набір тестів і так не повинен залежати від реальних ключів."""
+
+    def setUp(self) -> None:
+        self._old_key = os.environ.get("OPENROUTER_API_KEY")
+        os.environ["OPENROUTER_API_KEY"] = "test-placeholder-not-a-real-key"
+        self.addCleanup(self._restore_key)
+
+    def _restore_key(self) -> None:
+        if self._old_key is None:
+            os.environ.pop("OPENROUTER_API_KEY", None)
+        else:
+            os.environ["OPENROUTER_API_KEY"] = self._old_key
+
     def test_build_llm_uses_env_model_and_max_tokens(self) -> None:
         old_model = os.environ.get("OPENROUTER_MODEL")
         old_max = os.environ.get("OPENROUTER_MAX_TOKENS")
