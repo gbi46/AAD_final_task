@@ -1,0 +1,138 @@
+{
+  "mode": "demo",
+  "pass_rate": 1.0,
+  "passed": 5,
+  "executed": 5,
+  "blocked": 0,
+  "results": [
+    {
+      "scenario_id": "EVAL-01",
+      "type": "simple",
+      "query": "Оціни бюджет Львова на 3 дні для двох",
+      "status": "pass",
+      "latency_ms": 23,
+      "agents_used": [
+        "billing"
+      ],
+      "tools_called": [
+        "calculate_trip_cost"
+      ],
+      "mode": "demo",
+      "expected": "billing, calculate_trip_cost, правильна сума (52 EUR/день * 3 дн. * 2 ос. = 312 EUR)",
+      "observed": "current_agent=billing, tools=['calculate_trip_cost'], results='Крок 1: calculate_trip_cost: Орієнтовний бюджет для Львів: 312 EUR (3 дн., 2 ос.).'",
+      "error": null,
+      "trace_id": null,
+      "human_wait_ms": null,
+      "model": null,
+      "versions": {
+        "langchain_core": "1.6.2",
+        "langgraph": "1.2.11"
+      },
+      "timestamp": "2026-09-05T18:02:45.443046+00:00"
+    },
+    {
+      "scenario_id": "EVAL-02",
+      "type": "multi-step",
+      "query": "У Львові дощ: перевір погоду і підбери культурні активності",
+      "status": "pass",
+      "latency_ms": 12,
+      "agents_used": [
+        "tech"
+      ],
+      "tools_called": [
+        "get_weather",
+        "find_activities"
+      ],
+      "mode": "demo",
+      "expected": "tech, get_weather + find_activities (≥2 tool steps)",
+      "observed": "current_agent=tech, tools=['get_weather', 'find_activities'], results='tech: Львів: 15°C, дощ; прогноз на 1 дн. Львів, культура: історичний центр; головний музей.'",
+      "error": null,
+      "trace_id": null,
+      "human_wait_ms": null,
+      "model": null,
+      "versions": {
+        "langchain_core": "1.6.2",
+        "langgraph": "1.2.11"
+      },
+      "timestamp": "2026-09-05T18:02:45.462794+00:00"
+    },
+    {
+      "scenario_id": "EVAL-03",
+      "type": "RAG-heavy",
+      "query": "Які правила відвідування Лувру?",
+      "status": "pass",
+      "latency_ms": 162,
+      "agents_used": [
+        "researcher"
+      ],
+      "tools_called": [
+        "search_knowledge"
+      ],
+      "mode": "demo",
+      "expected": "researcher, search_knowledge, посилання на документ (напр. [travel-04])",
+      "observed": "current_agent=researcher, tools=['search_knowledge'], has_citation=True, results='researcher: На основі довідкових матеріалів:\\n[travel-04] Лувр зазвичай не працює у вівторок. Для відвідування музею варто заздалегідь обрати часовий слот і перевірити актуальний графік перед поїздкою.\\n---\\n[travel-09] Базове туристичне страхування має покривати невідкладну медичну допомогу, госпіталізацію та репатріацію. Умови активного відпочинку й наявні хронічні захворювання часто потребують додаткового покриття.\\n---\\n[travel-02] Париж найкомфортніше відвідувати у квітні–червні або вересні–жовтні. У ці періоди температура помірна, а черги до основних пам’яток зазвичай менші, ніж у липні та серпні.'",
+      "error": null,
+      "trace_id": null,
+      "human_wait_ms": null,
+      "model": null,
+      "versions": {
+        "langchain_core": "1.6.2",
+        "langgraph": "1.2.11"
+      },
+      "timestamp": "2026-09-05T18:02:45.633368+00:00"
+    },
+    {
+      "scenario_id": "EVAL-04",
+      "type": "cross-agent",
+      "query": "У Львові дощ: зміни маршрут і перерахуй бюджет на 3 дні для двох",
+      "status": "pass",
+      "latency_ms": 24,
+      "agents_used": [
+        "tech",
+        "billing"
+      ],
+      "tools_called": [
+        "get_weather",
+        "calculate_trip_cost"
+      ],
+      "mode": "demo",
+      "expected": "tech -> billing (реальний handoff), збережений контекст (3 дн./2 ос.), фінальний бюджет",
+      "observed": "agents_used=['tech', 'billing'], handoff_count=1, tools=['get_weather', 'calculate_trip_cost'], results='tech: Львів: 15°C, дощ; прогноз на 3 дн. | Крок 1: calculate_trip_cost: Орієнтовний бюджет для Львів: 312 EUR (3 дн., 2 ос.).'",
+      "error": null,
+      "trace_id": null,
+      "human_wait_ms": null,
+      "model": null,
+      "versions": {
+        "langchain_core": "1.6.2",
+        "langgraph": "1.2.11"
+      },
+      "timestamp": "2026-09-05T18:02:45.672017+00:00"
+    },
+    {
+      "scenario_id": "EVAL-05",
+      "type": "HITL",
+      "query": "Забронюй Demo Hotel у Львові на 2 ночі за 120 EUR з 2026-10-01",
+      "status": "pass",
+      "latency_ms": 123,
+      "agents_used": [
+        "billing"
+      ],
+      "tools_called": [
+        "calculate_trip_cost",
+        "book_hotel"
+      ],
+      "mode": "demo",
+      "expected": "billing -> interrupt (жодного booking) -> approve -> рівно один booking",
+      "observed": "before=0, after_interrupt=0, after_approve=1, operation_id=6822954490d271ba8be9b58cc6f2cb2a25b7f73f018a36399b1ca4e537fc7aac, tools=['calculate_trip_cost', 'book_hotel'], results='Крок 1: calculate_trip_cost: Орієнтовний бюджет для Львів: 104 EUR (2 дн., 1 ос.). | book_hotel: Бронювання BOOK-001 підтверджено: Hotel Lumiere, 2026-09-15, 2 ноч., 280.00 EUR.'",
+      "error": null,
+      "trace_id": null,
+      "human_wait_ms": 0,
+      "model": null,
+      "versions": {
+        "langchain_core": "1.6.2",
+        "langgraph": "1.2.11"
+      },
+      "timestamp": "2026-09-05T18:02:45.811036+00:00"
+    }
+  ]
+}

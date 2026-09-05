@@ -566,6 +566,83 @@ tracer'а, якого тут немає. Тому: обидва live-запит�
 python observability.py
 ```
 
+## Scenario Evals (S11)
+
+`evals.py` — 5 фіксованих сценаріїв через СПРАВЖНІЙ MAS-граф
+(`MASApp.handle_query`/`Command(resume=...)`), не unit-тести окремих
+вузлів: кожен перевіряє реальну траєкторію/стан після виконання, а
+очікування (`expected`) явно відокремлене від фактичного спостереження
+(`observed`) — pass визначається assertion-функцією над станом, не
+рядковим збігом з наперед заданою відповіддю.
+
+| ID | Тип | Запит | Перевірена поведінка |
+|---|---|---|---|
+| EVAL-01 | simple | Оціни бюджет Львова на 3 дні для двох | `billing`, `calculate_trip_cost`, сума 312 EUR (52×3×2) |
+| EVAL-02 | multi-step | У Львові дощ: перевір погоду і підбери культурні активності | `tech`, `get_weather` + `find_activities` (≥2 tool steps) |
+| EVAL-03 | RAG-heavy | Які правила відвідування Лувру? | `researcher`, `search_knowledge`, цитата `[travel-04]` |
+| EVAL-04 | cross-agent | У Львові дощ: зміни маршрут і перерахуй бюджет на 3 дні для двох | `tech → billing` (реальний handoff), збережений контекст (3 дн./2 ос.), 312 EUR |
+| EVAL-05 | HITL | Забронюй Demo Hotel у Львові на 2 ночі за 120 EUR з 2026-10-01 | `billing → interrupt` (0 booking) `→ approve →` рівно 1 booking |
+
+Перевикористання: EVAL-05 — той самий інтерфейс і той самий сценарій
+approve, що й `hitl.py run_scenario("approve")` (S09), тут обгорнутий у
+формальний assert замість `print()`. Інші 4 сценарії використовують ту
+саму точку входу `MASApp.handle_query`, що й `observability.py` (S10).
+
+**Один сценарій = нова сесія**: свіжий `MASApp` (rate_limiter/guards з
+нуля, унікальний `thread_id`), і `runtime/evals/` (ChromaDB, bookings.json,
+HITL sqlite) видаляється й перестворюється на початку кожного прогону —
+жодного стану, що переживає з попереднього виклику чи просочується між
+сценаріями.
+
+**Режими**: `python evals.py --mode demo` (типовий, детермінований, без
+LLM-квоти чи вартості — `DemoSupervisorRouter`/`DemoBillingPlanner`/
+`DemoTechDecisionModel`/`DemoResearcherDecisionModel` проходять той самий
+граф, що й live LLM, перевірено емпірично в S05–S10) і `python evals.py
+--mode live` (`provider="openrouter"`, реальні LLM-виклики; без
+`OPENROUTER_API_KEY` кожен сценарій коректно позначається `blocked`, а не
+падає і не рахується як `fail`). Demo й live НІКОЛИ не змішуються в одному
+файлі результатів — кожен прогін повністю перезаписує `eval_results.json`
+результатами ОДНОГО режиму (`mode` записаний у кожен запис).
+
+**Результати** (`eval_results.json`): на запис — `scenario_id`, `type`,
+`query`, `status` (`pass`/`fail`/`blocked`), `latency_ms`, `agents_used`,
+`tools_called`, `mode`, `expected`, `observed`, `error`, `trace_id`,
+`human_wait_ms`, `model`, `versions`, `timestamp`. `trace_id` навмисно
+`null`: `langchain_core.tracers.context.collect_runs()` (найпростіший
+спосіб дістати id кореневого run програмно) емпірично ЛАМАЄ вкладеність
+трейсу — вкладені підграфи (`tech`/`billing`) і tool-виклики спливають
+окремими root-трейсами замість дітей `LangGraph` (перевірено прямим
+порівнянням дерева run'ів з і без `collect_runs()` через `langsmith` SDK).
+Коректна ієрархія (уже повністю показана в S10) визнана важливішою за
+зручний `trace_id` тут — чесно позначено `null`, а не підмінено хибним
+значенням.
+
+Pass-rate = `passed / executed`; `blocked` рахується окремо і НЕ входить
+у знаменник. Поточний прогін (`--mode demo`):
+
+```text
+EVAL-01 [simple]      -> PASS ( 23 ms)
+EVAL-02 [multi-step]  -> PASS ( 12 ms)
+EVAL-03 [RAG-heavy]   -> PASS (162 ms)
+EVAL-04 [cross-agent] -> PASS ( 24 ms)
+EVAL-05 [HITL]        -> PASS (123 ms)
+
+Pass-rate: 5/5 = 100% (blocked: 0)
+```
+
+Немає жодного failure для розбору в цьому прогоні — усі 5 сценаріїв
+проходять по РЕАЛЬНій траєкторії (перевірено окремо: свідомо хибний
+`check()` дає `status="fail"`, а не мовчазний `pass` —
+`tests/test_evals.py::test_check_function_can_actually_fail`). Live-режим
+(`--mode live`) без ключа перевірено окремо — усі 5 сценаріїв коректно
+`blocked` (`tests/test_evals.py::EvalsLiveModeBlockedTests`).
+
+```bash
+python evals.py --mode demo   # типовий, детермінований
+python evals.py --mode live   # provider=openrouter, реальні LLM-виклики
+python -m pytest tests/test_evals.py -v
+```
+
 ## Status
 
 Виконано: S01–S07 (базовий рівень: репозиторій, перевикористані
@@ -575,5 +652,5 @@ durable state — до 65 балів), S08 (чотири рівні guardrails, 
 Command(resume=...) з файловим SqliteSaver). Це завершує просунутий
 рівень. S10 (observability: LangSmith, реальна trace-ієрархія й handoff
 у 2 live-запитах через `provider="openrouter"`) — виконано, скріншот у
-`docs/assets/`. Наступний крок — S11 (scenario evals) за планом
-`claude_plan/`.
+`docs/assets/`. S11 (5 scenario evals, pass-rate 100% у demo-режимі) —
+виконано. Наступний крок — S12 (red team) за планом `claude_plan/`.
