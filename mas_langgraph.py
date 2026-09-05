@@ -235,13 +235,20 @@ class LiveSupervisorRouter:
 # --- billing: planner -> executor -> replanner (з ДЗ2 plan_execute.py) -----
 
 
+_BILLING_STEP_FORMAT_HINT = (
+    "Кожен елемент — ОБОВ'ЯЗКОВО рядок валідного JSON у форматі "
+    '{"tool": "calculate_trip_cost"|"search_knowledge", "args": {...}}, БЕЗ жодного іншого тексту '
+    "чи природномовного опису. Приклади: "
+    '{"tool": "calculate_trip_cost", "args": {"city": "Париж", "days": 3, "travelers": 2}} або '
+    '{"tool": "search_knowledge", "args": {"query": "політика скасування бронювання"}}.'
+)
+
+
 class BillingPlan(BaseModel):
     """Структурований план бюджетно-довідкових кроків (без book_hotel — S09)."""
 
     goal: str = Field(description="Головна ціль користувача щодо бюджету/бронювання")
-    steps: list[str] = Field(
-        description="Послідовність з 1-4 кроків: лише calculate_trip_cost і search_knowledge"
-    )
+    steps: list[str] = Field(description=f"Послідовність з 1-4 кроків. {_BILLING_STEP_FORMAT_HINT}")
 
 
 class BillingReplanDecision(BaseModel):
@@ -249,7 +256,8 @@ class BillingReplanDecision(BaseModel):
         description="continue — наступний крок, replan — замінити залишок, finish — завершити"
     )
     updated_steps: list[str] | None = Field(
-        default=None, description="Нові невиконані кроки лише для action=replan"
+        default=None,
+        description=f"Нові невиконані кроки лише для action=replan. {_BILLING_STEP_FORMAT_HINT}",
     )
     reasoning: str = Field(description="Стисле пояснення рішення українською")
 
@@ -347,7 +355,7 @@ class BillingAgent:
 
     def __init__(
         self,
-        provider: Literal["demo", "gemini"],
+        provider: Literal["demo", "gemini", "openrouter"],
         llm: Any,
         logger: TrajectoryLogger,
         guard: ExecutionGuard,
@@ -357,7 +365,7 @@ class BillingAgent:
         self.logger = logger
         self.guard = guard
         self.dispatch = dispatch
-        if provider == "gemini":
+        if provider != "demo":
             self.planner_model = llm.with_structured_output(BillingPlan)
             self.replanner_model = llm.with_structured_output(BillingReplanDecision)
         else:
@@ -383,7 +391,7 @@ class BillingAgent:
     def _planner_node(self, state: BillingState) -> dict[str, Any]:
         self.guard.check_limits(0)
         started = time.monotonic()
-        if self.provider == "gemini":
+        if self.provider != "demo":
             prompt = (
                 "Створи план з 1-4 кроків, використовуючи лише calculate_trip_cost і "
                 "search_knowledge (get_weather і book_hotel НЕ входять у роль billing).\n"
@@ -453,7 +461,7 @@ class BillingAgent:
             "results": state["results"],
         }
         started = time.monotonic()
-        if self.provider == "gemini":
+        if self.provider != "demo":
             prompt = (
                 "Оціни прогрес виконання плану і поверни continue, replan або finish. "
                 "Для replan updated_steps містить лише нові невиконані кроки.\n"
@@ -536,7 +544,7 @@ class TechAgent:
 
     def __init__(
         self,
-        provider: Literal["demo", "gemini"],
+        provider: Literal["demo", "gemini", "openrouter"],
         llm: Any,
         logger: TrajectoryLogger,
         guard: ExecutionGuard,
@@ -550,7 +558,7 @@ class TechAgent:
         # get_weather/find_activities); фактичне ВИКОНАННЯ завжди йде через
         # self.dispatch, який сам вирішує — локальний wrapper чи MCP-tool.
         self.tools = [TOOLS_BY_NAME["get_weather"], TOOLS_BY_NAME["find_activities"]]
-        if provider == "gemini":
+        if provider != "demo":
             self.decision_model = llm.bind_tools(self.tools)
         else:
             self.decision_model = DemoTechDecisionModel()
@@ -569,7 +577,7 @@ class TechAgent:
         step_count = state.get("step_count", 0)
         self.guard.check_limits(step_count)
         started = time.monotonic()
-        if self.provider == "gemini":
+        if self.provider != "demo":
             prompt_messages = [HumanMessage(content=_TECH_SYSTEM_PROMPT)] + state["messages"]
             response = call_with_timeout(self.decision_model.invoke, self.guard.timeout_seconds, prompt_messages)
         else:
@@ -654,7 +662,7 @@ class DemoResearcherDecisionModel:
 class ResearcherAgent:
     def __init__(
         self,
-        provider: Literal["demo", "gemini"],
+        provider: Literal["demo", "gemini", "openrouter"],
         llm: Any,
         logger: TrajectoryLogger,
         guard: ExecutionGuard,
@@ -669,7 +677,7 @@ class ResearcherAgent:
         # нижче просто не спрацьовує (RAG-шлях без змін від S05).
         self.general_faq: list[dict[str, str]] | None = None
         self.search_tool = TOOLS_BY_NAME["search_knowledge"]  # лише схема для bind_tools
-        if provider == "gemini":
+        if provider != "demo":
             self.decision_model = llm.bind_tools([self.search_tool])
         else:
             self.decision_model = DemoResearcherDecisionModel()
@@ -708,7 +716,7 @@ class ResearcherAgent:
             self.logger.log("researcher_faq_resource", goal, answer, duration_ms=duration_ms, agent_name="researcher")
             return answer
 
-        if self.provider == "gemini":
+        if self.provider != "demo":
             prompt = f"{_RESEARCHER_SYSTEM_PROMPT}\n\nЗапит: {goal}"
             response = call_with_timeout(self.decision_model.invoke, self.guard.timeout_seconds, prompt)
             duration_ms = int((time.monotonic() - started) * 1000)
@@ -758,7 +766,7 @@ class ResearcherAgent:
 
 
 class GeneralAgent:
-    def __init__(self, provider: Literal["demo", "gemini"], llm: Any, logger: TrajectoryLogger):
+    def __init__(self, provider: Literal["demo", "gemini", "openrouter"], llm: Any, logger: TrajectoryLogger):
         self.provider = provider
         self.llm = llm
         self.logger = logger
@@ -780,7 +788,7 @@ class GeneralAgent:
             duration_ms = int((time.monotonic() - started) * 1000)
             self.logger.log("general_prompt_template", goal, answer, duration_ms=duration_ms, agent_name="general")
             return answer
-        if self.provider == "gemini":
+        if self.provider != "demo":
             prompt = (
                 "Ти — привітний туристичний асистент. Дай коротку відповідь або постав "
                 "уточнююче питання. НЕ використовуй жодних tools.\n" + goal
@@ -807,7 +815,7 @@ class GeneralAgent:
 class MASApp:
     def __init__(
         self,
-        provider: Literal["demo", "gemini"] = "demo",
+        provider: Literal["demo", "gemini", "openrouter"] = "demo",
         run_id: str = "mas-run",
         checkpointer: Any = None,
         interrupt_after: list[str] | None = None,
@@ -833,20 +841,8 @@ class MASApp:
         # діє одразу, без перестворення агентів.
         self.tools_by_name: dict[str, Any] = dict(TOOLS_BY_NAME)
 
-        if provider == "gemini":
-            if not os.getenv("GOOGLE_API_KEY"):
-                raise ValueError("Для режиму gemini задайте змінну GOOGLE_API_KEY")
-            from langchain_google_genai import ChatGoogleGenerativeAI
-
-            # Модель — зі змінної середовища, НЕ хардкод (task.txt: "модель
-            # задається змінною"). gemini-flash-latest — псевдонім, що сам
-            # вказує на актуальну рекомендовану flash-модель: конкретні
-            # версійні імена (напр. gemini-2.5-flash) з часом деприкейтяться
-            # для нових ключів — перевірено емпірично на реальному ключі
-            # (2.5-flash/2.5-flash-lite повернули 404 NOT_FOUND, latest-псевдонім
-            # і gemini-3.6-flash — робочі).
-            model_name = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-            self.llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.1)
+        if provider != "demo":
+            self.llm = self._build_llm(provider)
             self.router: Any = LiveSupervisorRouter(self.llm)
         else:
             self.router = DemoSupervisorRouter()
@@ -864,6 +860,59 @@ class MASApp:
         self.general_agent = GeneralAgent(provider, self.llm, self.logger)
 
         self.app = self._build_graph()
+
+    @staticmethod
+    def _build_llm(provider: Literal["gemini", "openrouter"]) -> Any:
+        """Створює live LLM-клієнт для обраного провайдера.
+
+        Обидва класи (`ChatGoogleGenerativeAI`, `ChatOpenAI`) реалізують той
+        самий інтерфейс LangChain `BaseChatModel` (`invoke`, `bind_tools`,
+        `with_structured_output`) — тому решта коду (агенти, supervisor)
+        працює з будь-яким із них однаково й перевіряє лише
+        `provider != "demo"`, а не конкретного провайдера.
+        """
+        if provider == "gemini":
+            if not os.getenv("GOOGLE_API_KEY"):
+                raise ValueError("Для режиму gemini задайте змінну GOOGLE_API_KEY")
+            from langchain_google_genai import ChatGoogleGenerativeAI
+
+            # Модель — зі змінної середовища, НЕ хардкод (task.txt: "модель
+            # задається змінною"). gemini-flash-latest — псевдонім, що сам
+            # вказує на актуальну рекомендовану flash-модель: конкретні
+            # версійні імена (напр. gemini-2.5-flash) з часом деприкейтяться
+            # для нових ключів — перевірено емпірично на реальному ключі
+            # (2.5-flash/2.5-flash-lite повернули 404 NOT_FOUND, latest-псевдонім
+            # і gemini-3.6-flash — робочі).
+            model_name = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+            return ChatGoogleGenerativeAI(model=model_name, temperature=0.1)
+
+        if provider == "openrouter":
+            if not os.getenv("OPENROUTER_API_KEY"):
+                raise ValueError("Для режиму openrouter задайте змінну OPENROUTER_API_KEY")
+            from langchain_openai import ChatOpenAI
+
+            # OpenRouter — єдиний OpenAI-сумісний ендпоінт до тієї самої
+            # рекомендованої в завданні моделі (тут за замовчуванням Claude
+            # Sonnet — одна з опцій task.txt), лише інший спосіб доступу,
+            # ніж прямий ключ провайдера; корисно, коли пряма квота
+            # вичерпана чи прямого ключа немає.
+            model_name = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.6")
+            # max_tokens: без явного ліміту ChatOpenAI/OpenRouter підставляють
+            # верхню межу моделі (тут — 65536), а обмежений баланс ключа не
+            # покриває стільки навіть для короткої відповіді — перевірено
+            # емпірично (402 "requires more credits ... requested up to
+            # 65536 tokens"). 4096 з запасом покриває наші структуровані
+            # відповіді (RouteDecision/BillingPlan/BillingReplanDecision) і
+            # звичайні репліки general.
+            return ChatOpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=os.environ["OPENROUTER_API_KEY"],
+                model=model_name,
+                max_tokens=int(os.getenv("OPENROUTER_MAX_TOKENS", "4096")),
+                temperature=0.1,
+            )
+
+        raise ValueError(f"Невідомий provider: {provider!r} (очікується 'demo', 'gemini' або 'openrouter')")
 
     # -- MCP (S06) -------------------------------------------------------------
 
