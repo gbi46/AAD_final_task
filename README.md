@@ -56,7 +56,9 @@ stdio-підпроцес через `MultiServerMCPClient`. Handoff обмеже
 
 ## Встановлення
 
-Перевірене середовище — Python 3.12.
+Перевірене середовище — Python 3.12, Linux. `requirements.txt` і
+`requirements-crewai.txt` містять повні знімки `pip freeze` відповідних
+середовищ із фіксованими прямими та транзитивними залежностями.
 
 ```bash
 python3.12 -m venv .venv
