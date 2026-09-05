@@ -27,7 +27,7 @@ def _redact_text(value: str) -> str:
     redacted = value
     for pattern in _SENSITIVE_PATTERNS:
         redacted = pattern.sub(_REDACTED, redacted)
-    redacted, _pii_found = output_guardrail(redacted)  #: PII, не лише API-ключі
+    redacted, _pii_found = output_guardrail(redacted)  # PII, не лише API-ключі
     return redacted
 
 

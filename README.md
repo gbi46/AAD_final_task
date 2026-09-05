@@ -1,5 +1,7 @@
 # Travel Support MAS
 
+## Domain
+
 Мультиагентна система туристичної підтримки: розраховує бюджет, добирає
 активності, відповідає на запитання за базою знань і демонструє бронювання
 з підтвердженням людини. Основна реалізація — LangGraph; альтернативна — CrewAI.
@@ -9,7 +11,7 @@
 `demo` працює без API-ключів; `live` використовує LLM для рішень і відповідей,
 але не підключає реальні туристичні сервіси.
 
-## Архітектура
+## Architecture
 
 ```mermaid
 flowchart TD
@@ -54,7 +56,7 @@ stdio-підпроцес через `MultiServerMCPClient`. Handoff обмеже
 ризиковий крок до виклику tool, а `approval_gate` очікує `Command(resume=...)`.
 Повторне виконання однакового бронювання повертає наявний запис.
 
-## Встановлення
+## Setup
 
 Перевірене середовище — Python 3.12, Linux. `requirements.txt` і
 `requirements-crewai.txt` містять повні знімки `pip freeze` відповідних
@@ -73,7 +75,7 @@ pip check
 параметром `MASApp(provider="demo"|"openrouter"|"gemini")`; модель — змінними
 `OPENROUTER_MODEL` або `GEMINI_MODEL`. Файл `.env` ігнорується Git.
 
-## Запуск
+## Run
 
 ```bash
 # Кілька туристичних запитів через LangGraph і MCP, без LLM
@@ -128,7 +130,7 @@ asyncio.run(main())
 `PERSISTENCE_RUNTIME_DIR`. Ці збережені приклади показують стан після
 відновлення; для звичайної роботи достатньо окремих runtime-сховищ.
 
-## MCP і база знань
+## MCP Tools, Resources and Reused Components
 
 | Примітив | Назва | Призначення |
 |---|---|---|
@@ -155,7 +157,7 @@ MCP-сервер повторно валідує аргументи Pydantic-с�
 `ExecutionGuard` та `TrajectoryLogger`. Планувальний і ReAct-цикли інтегровані
 як підграфи. Логування розширено полем `agent_name`, маскуванням ключів і PII.
 
-## Захист і HITL
+## Guardrails and HITL
 
 | Механізм | Ризик | Приклад |
 |---|---|---|
@@ -169,7 +171,7 @@ HITL показує назву tool, аргументи й ідентифіка�
 дію; `reject` завершує без запису; `edit` змінює аргументи перед валідацією.
 Невалідне рішення або невідповідна роль не дають виконати бронювання.
 
-## Оцінювання
+## Evaluation
 
 `eval_results.json`: **5/5 (100%) у demo-режимі** — simple billing,
 multi-step tech, RAG-heavy, cross-agent і HITL. Записи містять запит,
@@ -185,7 +187,7 @@ pass/fail, latency, agents_used і tools_called. `trace_id` може бути `n
 `python red_team.py --mode live`. Потрібен OpenRouter; ці команди
 перезаписують відповідні JSON-результати.
 
-## Трасування
+## Tracing
 
 Заповніть `LANGSMITH_API_KEY`, установіть `LANGSMITH_TRACING=true` і запустіть
 `python observability.py` з ключем OpenRouter. Траси містять supervisor,
@@ -202,7 +204,7 @@ pass/fail, latency, agents_used і tools_called. `trace_id` може бути `n
 outputs автоматичних LangSmith callbacks. Приклади трасування не містять
 PII; red-team сценарії з синтетичними PII виконуються без трасування.
 
-## OWASP ASI 2026
+## OWASP ASI 2026 Matrix
 
 | Ризик | Актуальність | Захист | Залишковий ризик |
 |---|---|---|---|
@@ -217,13 +219,15 @@ PII; red-team сценарії з синтетичними PII виконуют�
 | ASI09 Human-Agent Trust Exploitation | Висока: підтвердження бронювання | Interrupt, явне рішення, повторна валідація edit | Оператор не автентифікується; знання thread_id не є авторизацією |
 | ASI10 Rogue Agents | Середня: вихід за роль або цикл | Allowlist, max_handoffs, loop detector, evals | Немає зовнішнього kill switch та автоматичного моніторингу аномалій |
 
+### Residual Risks
+
 Ключові обмеження локального прототипу: довіра до процесу й оператора,
 евристична фільтрація та відсутність системного sandbox. Для використання
 з реальними бронюваннями потрібні автентифікація оператора і MCP-клієнтів,
 перевірка збереженого контексту, ізоляція MCP з мінімальними правами та
 перевірка походження залежностей.
 
-## CrewAI та порівняння
+## Framework Comparison (CrewAI)
 
 CrewAI використовує hierarchical coordinator і трьох спеціалістів: billing,
 tech, researcher. Кожен отримує окремий MCP allowlist. `book_hotel` недоступний,
@@ -269,7 +273,7 @@ LOC включає docstrings і виключає порожні та суто �
 Відмінність обсягу не є оцінкою продуктивності фреймворків: LangGraph також
 реалізує HITL, persistence та інтеграцію всіх guardrails.
 
-### Аналіз результатів
+### Results Analysis
 
 CrewAI зручний для початкового прототипу: role/goal/backstory задають
 спеціалістів, а manager делегує без ручного графа. Практична складність —

@@ -265,7 +265,7 @@ class DemoBillingPlanner:
             # Явний намір забронювати -> ЗМІШАНИЙ план: спершу безпечний
             # calculate_trip_cost (виконується одразу, без підтвердження),
             # потім book_hotel (RISKY_TOOLS — виконавець зупиниться саме на
-            # цьому кроці для HITL,; approval_gate вирішить його долю).
+            # цьому кроці для HITL; approval_gate вирішить його долю).
             # Синтетичні параметри демонстраційного бронювання.
             city = _extract_city(goal, default="Париж")
             days = _extract_days(goal, default=2)
@@ -326,7 +326,7 @@ class BillingState(TypedDict, total=False):
     current_step: int
     results: list[str]
     completed: bool
-    pending_risky_step: dict[str, Any] | None  #: сигнал назовні, tool ще НЕ виконано
+    pending_risky_step: dict[str, Any] | None  # сигнал назовні, tool ще НЕ виконано
 
 
 class BillingAgent:
@@ -653,7 +653,7 @@ class ResearcherAgent:
         self.dispatch = dispatch
         # general_faq заповнюється MASApp.connect_mcp з resource
         # faq://general; поки MCP не підключено — лишається None і fast-path
-        # нижче просто не спрацьовує (RAG-шлях без змін від ).
+        # нижче просто не спрацьовує (RAG-шлях лишається без змін).
         self.general_faq: list[dict[str, str]] | None = None
         self.search_tool = TOOLS_BY_NAME["search_knowledge"]  # лише схема для bind_tools
         if provider != "demo":
@@ -750,7 +750,7 @@ class GeneralAgent:
         self.llm = llm
         self.logger = logger
         # mcp_client заповнюється MASApp.connect_mcp; поки None —
-        # поведінка ідентична (canned demo-рядок чи прямий LLM-виклик).
+        # поведінка без змін (canned demo-рядок чи прямий LLM-виклик).
         self.mcp_client: Any = None
 
     async def run(self, goal: str) -> str:
@@ -805,7 +805,7 @@ class MASApp:
         self.llm: Any = None
         self.mcp_client: Any = None
         # checkpointer/interrupt_after — durable state. Без checkpointer
-        # (типовий випадок для і більшості тестів) граф поводиться як
+        # (типовий випадок для більшості тестів) граф поводиться як
         # раніше: без збереження стану між викликами. З файловим SqliteSaver
         # (persistence_demo.py) той самий граф переживає перезапуск процесу.
         self.checkpointer = checkpointer
@@ -1166,7 +1166,7 @@ class MASApp:
             }
 
         if pending_risky_step is not None:
-            #: НЕ completed — граф має пройти через approval_gate.
+            # НЕ completed — граф має пройти через approval_gate.
             tool_name = pending_risky_step["name"]
             args = pending_risky_step["arguments"]
             operation_id = book_hotel_operation_id(**args) if tool_name == "book_hotel" else None
@@ -1192,7 +1192,7 @@ class MASApp:
         return {
             "completed": True,
             "plan": plan,
-            "current_step": len(results),  # відображає прогрес billing у зовнішньому стані (: порівняння до/після)
+            "current_step": len(results),  # відображає прогрес billing у зовнішньому стані (порівняння до/після)
             "results": results,
             "messages": [AIMessage(content=answer)],
             "handoff_context": None,
