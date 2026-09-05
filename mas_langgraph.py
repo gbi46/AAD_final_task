@@ -1,4 +1,4 @@
-"""Мультиагентна система (MAS) туристичної координації над LangGraph (S05).
+"""Мультиагентна система (MAS) туристичної координації над LangGraph (S05+S06).
 
 Supervisor-вузол маршрутизує запит між чотирма спеціалізованими агентами:
 
@@ -9,37 +9,55 @@ Supervisor-вузол маршрутизує запит між чотирма с
 - `tech` — погода, маршрут, активності: ReAct LLM → tools → LLM,
   перенесений і адаптований з `Kravchuk_AAD_1/agent.py`.
 - `researcher` — туристичні правила й FAQ: LLM вирішує, чи потрібен
-  `search_knowledge` (Agentic RAG), відповідь цитує ID документів.
-- `general` — привітання й уточнення без ризикових викликів.
+  `search_knowledge` (Agentic RAG), відповідь цитує ID документів; при
+  підключеному MCP спершу перевіряє статичний resource `faq://general`
+  (дешевше за RAG) і лише тоді звертається до tool.
+- `general` — привітання й уточнення без ризикових викликів; при
+  підключеному MCP формує відповідь через prompt `travel_reply`.
 
-Локальні валідовані wrappers з `tools_legacy.py` викликаються напряму;
-підключення того самого набору tools через MCP — S06.
+Усі три агенти викликають tools через ОДИН спільний dispatcher
+(`MASApp.dispatch_tool`, S06) — той самий метод обслуговує локальні
+LangChain-обгортки з `tools_legacy.py` (за замовчуванням) і MCP-tools,
+завантажені через `MultiServerMCPClient` після `await MASApp.connect_mcp()`
+(stdio, абсолютний шлях до `mcp_server.py`, поточний `sys.executable`). Це
+та сама точка, куди S08 додасть guardrail-політики (allowlist per agent,
+rate-limit).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import operator
 import os
 import re
+import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field
 
 from safety import ExecutionGuard, SafetyStop, call_with_timeout
-from tools_legacy import TOOLS_BY_NAME, search_knowledge_core
+from tools_legacy import TOOLS_BY_NAME
 from trajectory_logger import TrajectoryLogger
 
 AgentName = Literal["billing", "tech", "researcher", "general"]
 
 MAX_HANDOFFS = 1
 MAX_SUPERVISOR_VISITS = 8
+
+
+class ToolDispatchError(RuntimeError):
+    """Підняте dispatcher'ом (`MASApp.dispatch_tool`), коли виклик tool
+    завершився помилкою (невідомий інструмент, збій MCP-сервера тощо).
+    Агенти ловлять це виключення і формують явне повідомлення про помилку —
+    збій НІКОЛИ не повертається як фальшивий успішний результат.
+    """
 
 
 # --- Спільні допоміжні функції (місто/дні/мандрівники з тексту запиту) -----
@@ -74,6 +92,27 @@ def _extract_travelers(text: str) -> int:
 def _message_text(message: BaseMessage) -> str:
     content = getattr(message, "content", "")
     return content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+
+
+def _stringify_tool_result(result: Any) -> str:
+    """Нормалізує результат tool до єдиного текстового рядка.
+
+    Локальні LangChain-обгортки з `tools_legacy.py` повертають готовий
+    `str`. MCP-tool через `.ainvoke()` повертає список content-блоків
+    (`[{"type": "text", "text": "...", ...}, ...]`) — без цієї нормалізації
+    агенти отримували б Python-репр списку словників замість тексту.
+    """
+    if isinstance(result, str):
+        return result
+    if isinstance(result, list):
+        parts = []
+        for block in result:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+            else:
+                parts.append(str(block))
+        return "".join(parts)
+    return str(result)
 
 
 # --- Стан MAS і reducers -----------------------------------------------------
@@ -157,7 +196,7 @@ class DemoSupervisorRouter:
             return RouteDecision(action="tech", reasoning="Запит стосується погоди, маршруту чи активностей.")
         if any(k in lower for k in ("бюджет", "вартість", "коштувати", "заброн", "готел")):
             return RouteDecision(action="billing", reasoning="Запит стосується бюджету або бронювання.")
-        if any(k in lower for k in ("прав", "віз", "лувр", "музе", "безпек", "транспорт", "страхув")):
+        if any(k in lower for k in ("прав", "віз", "лувр", "музе", "безпек", "транспорт", "страхув", "крадіж")):
             return RouteDecision(
                 action="researcher", reasoning="Запит стосується туристичних правил чи довідкової інформації."
             )
@@ -270,10 +309,18 @@ class BillingState(TypedDict, total=False):
 class BillingAgent:
     """Підграф billing: окремі planner/executor/replanner-вузли (S05)."""
 
-    def __init__(self, provider: Literal["demo", "gemini"], llm: Any, logger: TrajectoryLogger, guard: ExecutionGuard):
+    def __init__(
+        self,
+        provider: Literal["demo", "gemini"],
+        llm: Any,
+        logger: TrajectoryLogger,
+        guard: ExecutionGuard,
+        dispatch: Any,
+    ):
         self.provider = provider
         self.logger = logger
         self.guard = guard
+        self.dispatch = dispatch
         if provider == "gemini":
             self.planner_model = llm.with_structured_output(BillingPlan)
             self.replanner_model = llm.with_structured_output(BillingReplanDecision)
@@ -315,18 +362,19 @@ class BillingAgent:
         )
         return {"plan": plan.steps, "current_step": 0, "results": [], "completed": False}
 
-    def _executor_node(self, state: BillingState) -> dict[str, Any]:
+    async def _executor_node(self, state: BillingState) -> dict[str, Any]:
         index = state["current_step"]
         if index >= len(state["plan"]):
             return {"completed": True}
         self.guard.check_limits(index)
         name, arguments = _decode_step(state["plan"][index])
+        self.guard.register_call(name, arguments)
         started = time.monotonic()
-        if name not in TOOLS_BY_NAME:
-            result = f"Невідомий інструмент: {name}."
-        else:
-            self.guard.register_call(name, arguments)
-            result = f"{name}: {TOOLS_BY_NAME[name].invoke(arguments)}"
+        try:
+            tool_result = await self.dispatch(name, arguments, "billing")
+            result = f"{name}: {tool_result}"
+        except ToolDispatchError as exc:
+            result = str(exc)
         duration_ms = int((time.monotonic() - started) * 1000)
         number = index + 1
         self.logger.log(
@@ -367,9 +415,9 @@ class BillingAgent:
             return {"plan": updated}
         return {}
 
-    def run(self, goal: str) -> tuple[list[str], list[str]]:
+    async def run(self, goal: str) -> tuple[list[str], list[str]]:
         self.guard.reset()
-        final = self.app.invoke(
+        final = await self.app.ainvoke(
             {"goal": goal, "plan": [], "current_step": 0, "results": [], "completed": False}
         )
         return final["plan"], final["results"]
@@ -421,16 +469,26 @@ class TechState(TypedDict, total=False):
 class TechAgent:
     """Підграф tech: agent -> tools -> agent (перенесено з ДЗ1 TravelAgent)."""
 
-    def __init__(self, provider: Literal["demo", "gemini"], llm: Any, logger: TrajectoryLogger, guard: ExecutionGuard):
+    def __init__(
+        self,
+        provider: Literal["demo", "gemini"],
+        llm: Any,
+        logger: TrajectoryLogger,
+        guard: ExecutionGuard,
+        dispatch: Any,
+    ):
         self.provider = provider
         self.logger = logger
         self.guard = guard
+        self.dispatch = dispatch
+        # self.tools — лише для JSON-схем bind_tools (щоб LLM знав аргументи
+        # get_weather/find_activities); фактичне ВИКОНАННЯ завжди йде через
+        # self.dispatch, який сам вирішує — локальний wrapper чи MCP-tool.
         self.tools = [TOOLS_BY_NAME["get_weather"], TOOLS_BY_NAME["find_activities"]]
         if provider == "gemini":
             self.decision_model = llm.bind_tools(self.tools)
         else:
             self.decision_model = DemoTechDecisionModel()
-        self.tool_node = ToolNode(self.tools)
         self.app = self._build_graph()
 
     def _build_graph(self) -> Any:
@@ -466,17 +524,28 @@ class TechAgent:
             self.guard.register_call(call["name"], call["args"])
         return {"messages": [response], "step_count": step_count + 1}
 
-    def _tools_node(self, state: TechState) -> dict[str, Any]:
+    async def _tools_node(self, state: TechState) -> dict[str, Any]:
         step_count = state.get("step_count", 0)
         self.guard.check_limits(step_count)
+        calls = state["messages"][-1].tool_calls
         started = time.monotonic()
-        result = self.tool_node.invoke({"messages": state["messages"]})
+        # register_call для детектора циклів уже виконано в _agent_node одразу
+        # після генерації tool_calls — тут його НЕ повторюємо (інакше кожен
+        # виклик рахувався б двічі і max_repeats спрацював би вдвічі швидше).
+        outputs: list[ToolMessage] = []
+        for call in calls:
+            try:
+                result = await self.dispatch(call["name"], call["args"], "tech")
+                outputs.append(ToolMessage(content=result, name=call["name"], tool_call_id=call["id"]))
+            except ToolDispatchError as exc:
+                outputs.append(
+                    ToolMessage(content=str(exc), name=call["name"], tool_call_id=call["id"], status="error")
+                )
         duration_ms = int((time.monotonic() - started) * 1000)
         self.guard.check_limits(step_count)
-        outputs = result["messages"]
         self.logger.log(
             "tech_tools",
-            state["messages"][-1].tool_calls,
+            calls,
             [_message_text(m) for m in outputs],
             duration_ms=duration_ms,
             agent_name="tech",
@@ -487,9 +556,9 @@ class TechAgent:
     def _router(state: TechState) -> str:
         return "tools" if getattr(state["messages"][-1], "tool_calls", None) else END
 
-    def run(self, goal: str) -> tuple[str, list[str]]:
+    async def run(self, goal: str) -> tuple[str, list[str]]:
         self.guard.reset()
-        final = self.app.invoke({"messages": [HumanMessage(content=goal)], "step_count": 0})
+        final = await self.app.ainvoke({"messages": [HumanMessage(content=goal)], "step_count": 0})
         answer = _message_text(final["messages"][-1])
         used_tools = [m.name for m in final["messages"] if isinstance(m, ToolMessage)]
         return answer, used_tools
@@ -518,20 +587,62 @@ class DemoResearcherDecisionModel:
 
 
 class ResearcherAgent:
-    def __init__(self, provider: Literal["demo", "gemini"], llm: Any, logger: TrajectoryLogger, guard: ExecutionGuard):
+    def __init__(
+        self,
+        provider: Literal["demo", "gemini"],
+        llm: Any,
+        logger: TrajectoryLogger,
+        guard: ExecutionGuard,
+        dispatch: Any,
+    ):
         self.provider = provider
         self.logger = logger
         self.guard = guard
-        self.search_tool = TOOLS_BY_NAME["search_knowledge"]
+        self.dispatch = dispatch
+        # general_faq заповнюється MASApp.connect_mcp() (S06) з resource
+        # faq://general; поки MCP не підключено — лишається None і fast-path
+        # нижче просто не спрацьовує (RAG-шлях без змін від S05).
+        self.general_faq: list[dict[str, str]] | None = None
+        self.search_tool = TOOLS_BY_NAME["search_knowledge"]  # лише схема для bind_tools
         if provider == "gemini":
             self.decision_model = llm.bind_tools([self.search_tool])
         else:
             self.decision_model = DemoResearcherDecisionModel()
 
-    def run(self, goal: str) -> str:
+    def _match_faq(self, goal: str) -> dict[str, str] | None:
+        """Дешевий лексичний пошук по завантаженому faq://general — перш ніж
+        звертатися до RAG tool. Простий збіг значущого слова (>3 символів)
+        між запитом і питанням з FAQ.
+
+        Самопосилальний запис FAQ ("Де шукати детальні правила...", чия
+        відповідь сама відсилає до search_knowledge) свідомо виключено з
+        матчингу: інакше загальне слово на кшталт "правила" перехоплювало б
+        запити, що насправді потребують RAG (напр. про Лувр) — знайдено й
+        виправлено під час ручної перевірки MCP-демонстрації.
+        """
+        if not self.general_faq:
+            return None
+        lower = goal.lower()
+        for entry in self.general_faq:
+            if "search_knowledge" in entry["answer"]:
+                continue
+            question_words = {w for w in entry["question"].lower().split() if len(w) > 3}
+            if any(word in lower for word in question_words):
+                return entry
+        return None
+
+    async def run(self, goal: str) -> str:
         self.guard.reset()
         self.guard.check_limits(0)
         started = time.monotonic()
+
+        faq_match = self._match_faq(goal)
+        if faq_match:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            answer = f"{faq_match['answer']} (джерело: faq://general — «{faq_match['question']}»)"
+            self.logger.log("researcher_faq_resource", goal, answer, duration_ms=duration_ms, agent_name="researcher")
+            return answer
+
         if self.provider == "gemini":
             prompt = f"{_RESEARCHER_SYSTEM_PROMPT}\n\nЗапит: {goal}"
             response = call_with_timeout(self.decision_model.invoke, self.guard.timeout_seconds, prompt)
@@ -544,7 +655,11 @@ class ResearcherAgent:
                 return answer
             call = calls[0]
             self.guard.register_call(call["name"], call["args"])
-            result = search_knowledge_core(**call["args"])
+            try:
+                result = await self.dispatch(call["name"], call["args"], "researcher")
+            except ToolDispatchError as exc:
+                self.logger.log("researcher_rag_error", goal, str(exc), duration_ms=duration_ms, agent_name="researcher")
+                return str(exc)
             self.logger.log(
                 "researcher_rag", goal, result, tool_calls=calls, duration_ms=duration_ms, agent_name="researcher"
             )
@@ -558,7 +673,11 @@ class ResearcherAgent:
             self.logger.log("researcher_decision", goal, answer, duration_ms=duration_ms, agent_name="researcher")
             return answer
         self.guard.register_call("search_knowledge", {"query": query})
-        result = search_knowledge_core(query, limit=3)
+        try:
+            result = await self.dispatch("search_knowledge", {"query": query}, "researcher")
+        except ToolDispatchError as exc:
+            self.logger.log("researcher_rag_error", goal, str(exc), duration_ms=duration_ms, agent_name="researcher")
+            return str(exc)
         self.logger.log(
             "researcher_rag",
             goal,
@@ -578,9 +697,24 @@ class GeneralAgent:
         self.provider = provider
         self.llm = llm
         self.logger = logger
+        # mcp_client заповнюється MASApp.connect_mcp() (S06); поки None —
+        # поведінка ідентична S05 (canned demo-рядок чи прямий LLM-виклик).
+        self.mcp_client: Any = None
 
-    def run(self, goal: str) -> str:
+    async def run(self, goal: str) -> str:
         started = time.monotonic()
+        if self.mcp_client is not None:
+            # prompt повертає ШАБЛОН (не готову вигадану відповідь) —
+            # природний фіт для ролі general: "привітання й уточнення".
+            messages = await self.mcp_client.get_prompt(
+                "travel",
+                "travel_reply",
+                arguments={"traveler_name": "Мандрівник", "issue_summary": goal, "tone": "дружній"},
+            )
+            answer = str(messages[0].content) if messages else ""
+            duration_ms = int((time.monotonic() - started) * 1000)
+            self.logger.log("general_prompt_template", goal, answer, duration_ms=duration_ms, agent_name="general")
+            return answer
         if self.provider == "gemini":
             prompt = (
                 "Ти — привітний туристичний асистент. Дай коротку відповідь або постав "
@@ -606,6 +740,12 @@ class MASApp:
         self.provider = provider
         self.logger = TrajectoryLogger(run_id)
         self.llm: Any = None
+        self.mcp_client: Any = None
+        # Локальні LangChain-обгортки за замовчуванням; connect_mcp() (S06)
+        # ОНОВЛЮЄ цей самий словник in-place MCP-tools з тими самими іменами
+        # — агенти тримають лише bound-метод dispatch_tool, тому підміна
+        # діє одразу, без перестворення агентів.
+        self.tools_by_name: dict[str, Any] = dict(TOOLS_BY_NAME)
 
         if provider == "gemini":
             if not os.getenv("GOOGLE_API_KEY"):
@@ -622,12 +762,117 @@ class MASApp:
             "tech": ExecutionGuard(max_steps=6, timeout_seconds=30.0, max_repeats=3),
             "researcher": ExecutionGuard(max_steps=4, timeout_seconds=20.0, max_repeats=3),
         }
-        self.billing_agent = BillingAgent(provider, self.llm, self.logger, self.guards["billing"])
-        self.tech_agent = TechAgent(provider, self.llm, self.logger, self.guards["tech"])
-        self.researcher_agent = ResearcherAgent(provider, self.llm, self.logger, self.guards["researcher"])
+        self.billing_agent = BillingAgent(provider, self.llm, self.logger, self.guards["billing"], self.dispatch_tool)
+        self.tech_agent = TechAgent(provider, self.llm, self.logger, self.guards["tech"], self.dispatch_tool)
+        self.researcher_agent = ResearcherAgent(
+            provider, self.llm, self.logger, self.guards["researcher"], self.dispatch_tool
+        )
         self.general_agent = GeneralAgent(provider, self.llm, self.logger)
 
         self.app = self._build_graph()
+
+    # -- MCP (S06) -------------------------------------------------------------
+
+    async def connect_mcp(self, server_path: str | Path | None = None, env: dict[str, str] | None = None) -> None:
+        """Підключити travel-support MCP-сервер (S03) через stdio.
+
+        Абсолютний шлях до `mcp_server.py` і поточний `sys.executable` (а не
+        системний `python` з PATH) — інакше сервер міг би стартувати в
+        іншому середовищі без потрібних залежностей. Після виклику tools з
+        MCP ЗАМІНЮЮТЬ локальні wrappers у `self.tools_by_name` для тих самих
+        імен — виконання відбувається реальним subprocess-викликом MCP
+        (`MultiServerMCPClient` відкриває нову сесію на кожен виклик tool,
+        resource чи prompt — довготривалого з'єднання тримати не потрібно).
+        Також завантажує resource `faq://general` у researcher.
+
+        `env`, якщо переданий, ПОВНІСТЮ замінює середовище subprocess (а не
+        додає до нього) — виклик має сам змержити його з `os.environ`,
+        якщо потрібно зберегти PATH/локаль тощо (див. `__main__` нижче).
+        """
+        from langchain_mcp_adapters.client import MultiServerMCPClient
+
+        path = Path(server_path) if server_path else Path(__file__).resolve().parent / "mcp_server.py"
+        connection: dict[str, Any] = {"command": sys.executable, "args": [str(path)], "transport": "stdio"}
+        if env is not None:
+            connection["env"] = env
+        # handle_tool_errors=False: за замовчуванням адаптер ковтає
+        # CallToolResult(isError=True) і повертає текст помилки як звичайний
+        # успішний рядок (щоб ReAct-агент міг "самовиправитись") — саме
+        # той фальшивий успіх, якого явно вимагає уникати план. З False
+        # такий збій підіймається як виключення й ловиться dispatch_tool
+        # так само, як помилка локального tool (виявлено emпірично і
+        # виправлено — інакше невалідне місто виглядало б як "успішний"
+        # прогноз погоди).
+        self.mcp_client = MultiServerMCPClient({"travel": connection}, handle_tool_errors=False)
+        mcp_tools = await self.mcp_client.get_tools()
+        self.tools_by_name.update({tool.name: tool for tool in mcp_tools})
+
+        faq_blobs = await self.mcp_client.get_resources("travel", uris="faq://general")
+        general_faq = json.loads(faq_blobs[0].as_string()) if faq_blobs else None
+        self.researcher_agent.general_faq = general_faq
+        self.general_agent.mcp_client = self.mcp_client
+
+        self.logger.log(
+            "mcp_connect",
+            str(path),
+            f"Завантажено {len(mcp_tools)} MCP tools ({sorted(t.name for t in mcp_tools)}); "
+            f"faq://general: {len(general_faq) if general_faq else 0} записів.",
+            agent_name="supervisor",
+        )
+
+    async def dispatch_tool(self, name: str, arguments: dict[str, Any], agent_name: str) -> str:
+        """ЄДИНА точка виклику будь-якого tool з будь-якого агента (billing/
+        tech/researcher) — локального чи MCP-tool з `self.tools_by_name`.
+        Сюди S08 додасть guardrail-політики (allowlist per agent, rate-limit).
+
+        Записує tool_call_id, аргументи, тривалість і agent_name у спільний
+        TrajectoryLogger — і для успіху, і для помилки. Збій (невідомий tool,
+        падіння MCP-сервера) підіймається як `ToolDispatchError`, а НЕ
+        повертається як фальшивий успішний рядок.
+        """
+        tool = self.tools_by_name.get(name)
+        tool_call_id = str(uuid.uuid4())
+        started = time.monotonic()
+        if tool is None:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            message = f"Невідомий інструмент: {name}."
+            self.logger.log(
+                "tool_dispatch_error",
+                {"tool_call_id": tool_call_id, "name": name, "args": arguments},
+                message,
+                tool_calls=[{"name": name, "args": arguments, "id": tool_call_id}],
+                duration_ms=duration_ms,
+                agent_name=agent_name,
+            )
+            raise ToolDispatchError(message)
+        try:
+            if hasattr(tool, "ainvoke"):
+                raw_result = await tool.ainvoke(arguments)
+            else:
+                raw_result = tool.invoke(arguments)
+            result = _stringify_tool_result(raw_result)
+        except Exception as exc:  # збій transport/сервера чи бізнес-логіки — не ковтаємо мовчки
+            duration_ms = int((time.monotonic() - started) * 1000)
+            message = f"Tool {name} завершився помилкою: {exc}"
+            self.logger.log(
+                "tool_dispatch_error",
+                {"tool_call_id": tool_call_id, "name": name, "args": arguments},
+                message,
+                tool_calls=[{"name": name, "args": arguments, "id": tool_call_id}],
+                duration_ms=duration_ms,
+                agent_name=agent_name,
+            )
+            raise ToolDispatchError(message) from exc
+        duration_ms = int((time.monotonic() - started) * 1000)
+        self.logger.log(
+            "tool_dispatch",
+            {"tool_call_id": tool_call_id, "name": name, "args": arguments},
+            str(result),
+            tool_calls=[{"name": name, "args": arguments, "id": tool_call_id}],
+            duration_ms=duration_ms,
+            agent_name=agent_name,
+        )
+        return str(result)
 
     # -- побудова зовнішнього графа ------------------------------------------
 
@@ -654,9 +899,25 @@ class MASApp:
         """Обгортка: додає до `update["trajectory"]` лише нові кроки, залишені
         цим викликом у спільному self.logger — без дублювання (reducer вище
         додатково підстраховує ідемпотентність при повторних візитах).
-        """
 
-        def wrapped(state: MASState) -> dict[str, Any]:
+        `fn` може бути sync (supervisor/general без MCP) або async (billing/
+        tech/researcher — викликають dispatch_tool); LangGraph підтримує
+        змішані sync/async вузли в одному графі при виклику через `ainvoke`,
+        тому тип обгортки визначаємо автоматично.
+        """
+        if asyncio.iscoroutinefunction(fn):
+
+            async def wrapped_async(state: MASState) -> dict[str, Any]:
+                before = len(self.logger.steps)
+                update = await fn(state)
+                delta = self.logger.steps[before:]
+                if delta:
+                    update = {**update, "trajectory": delta}
+                return update
+
+            return wrapped_async
+
+        def wrapped_sync(state: MASState) -> dict[str, Any]:
             before = len(self.logger.steps)
             update = fn(state)
             delta = self.logger.steps[before:]
@@ -664,7 +925,7 @@ class MASApp:
                 update = {**update, "trajectory": delta}
             return update
 
-        return wrapped
+        return wrapped_sync
 
     @staticmethod
     def _user_goal(state: MASState) -> str:
@@ -718,11 +979,11 @@ class MASApp:
 
     # -- агенти-вузли ----------------------------------------------------------
 
-    def _billing_node(self, state: MASState) -> dict[str, Any]:
+    async def _billing_node(self, state: MASState) -> dict[str, Any]:
         handoff = state.get("handoff_context")
         goal = handoff["context"] if handoff else self._user_goal(state)
         try:
-            plan, results = self.billing_agent.run(goal)
+            plan, results = await self.billing_agent.run(goal)
         except SafetyStop as exc:
             message = f"billing: безпечно зупинено ({exc})"
             return {
@@ -740,10 +1001,10 @@ class MASApp:
             "handoff_context": None,
         }
 
-    def _tech_node(self, state: MASState) -> dict[str, Any]:
+    async def _tech_node(self, state: MASState) -> dict[str, Any]:
         goal = self._user_goal(state)
         try:
-            answer, _used_tools = self.tech_agent.run(goal)
+            answer, _used_tools = await self.tech_agent.run(goal)
         except SafetyStop as exc:
             message = f"tech: безпечно зупинено ({exc})"
             return {"completed": True, "results": [message], "messages": [AIMessage(content=message)]}
@@ -759,22 +1020,22 @@ class MASApp:
             }
         return {"completed": True, "results": [f"tech: {answer}"], "messages": [AIMessage(content=answer)]}
 
-    def _researcher_node(self, state: MASState) -> dict[str, Any]:
+    async def _researcher_node(self, state: MASState) -> dict[str, Any]:
         goal = self._user_goal(state)
         try:
-            answer = self.researcher_agent.run(goal)
+            answer = await self.researcher_agent.run(goal)
         except SafetyStop as exc:
             answer = f"researcher: безпечно зупинено ({exc})"
         return {"completed": True, "results": [f"researcher: {answer}"], "messages": [AIMessage(content=answer)]}
 
-    def _general_node(self, state: MASState) -> dict[str, Any]:
+    async def _general_node(self, state: MASState) -> dict[str, Any]:
         goal = self._user_goal(state)
-        answer = self.general_agent.run(goal)
+        answer = await self.general_agent.run(goal)
         return {"completed": True, "results": [f"general: {answer}"], "messages": [AIMessage(content=answer)]}
 
     # -- публічний вхід --------------------------------------------------------
 
-    def handle_query(self, query: str, thread_id: str = "demo") -> dict[str, Any]:
+    async def handle_query(self, query: str, thread_id: str = "demo") -> dict[str, Any]:
         initial_state: MASState = {
             "messages": [HumanMessage(content=query)],
             "current_agent": "general",
@@ -790,36 +1051,52 @@ class MASApp:
             "handoff_context": None,
             "handoff_count": 0,
         }
-        return self.app.invoke(initial_state)
+        return await self.app.ainvoke(initial_state)
 
 
-if __name__ == "__main__":
-    from pathlib import Path
-
+async def _run_demo() -> None:
     from tools_legacy import configure_storage
 
     # Демо-запуск — це runtime-сесія, не контрольний артефакт здачі: сховище
-    # спрямовуємо у gitignored runtime/, а не в корінь репозиторію.
+    # спрямовуємо у gitignored runtime/, а не в корінь репозиторію. Той самий
+    # runtime_dir передається MCP-subprocess'у через env, щоб і його ChromaDB/
+    # bookings.json теж лишались поза коренем репозиторію.
     runtime_dir = Path(__file__).resolve().parent / "runtime"
     runtime_dir.mkdir(exist_ok=True)
     configure_storage(runtime_dir / "chroma_db", runtime_dir / "bookings.json")
 
     mas = MASApp(provider="demo", run_id="mas-demo")
+    # provider="demo" лишає маршрутизацію й планування детермінованими
+    # (без LLM/API-ключа), а connect_mcp() підміняє ВИКОНАННЯ tools на
+    # справжні виклики subprocess MCP-сервера — і те, і інше проходить
+    # через той самий граф і той самий dispatch_tool.
+    mcp_env = {
+        **os.environ,
+        "MCP_KNOWLEDGE_PATH": str(runtime_dir / "chroma_db"),
+        "MCP_BOOKING_PATH": str(runtime_dir / "bookings.json"),
+    }
+    await mas.connect_mcp(env=mcp_env)
+
     demo_queries = [
-        "Скільки коштуватиме подорож до Парижа на 5 днів для двох?",  # billing + реальний replan (>500 EUR)
-        "У Львові дощ: перевір погоду і підбери культурні активності",  # tech
-        "Які правила відвідування Лувру?",  # researcher
-        "Привіт! Що ти вмієш?",  # general
-        "Яка погода у Львові і скільки коштуватиме подорож на 3 дні?",  # tech -> handoff -> billing
+        "Скільки коштуватиме подорож до Парижа на 5 днів для двох?",  # billing + реальний replan (>500 EUR), MCP
+        "У Львові дощ: перевір погоду і підбери культурні активності",  # tech, MCP
+        "Які правила відвідування Лувру?",  # researcher: RAG через MCP (не FAQ resource)
+        "Як зменшити ризик крадіжок у подорожі?",  # researcher: fast-path через faq://general resource
+        "Привіт! Що ти вмієш?",  # general: prompt travel_reply через MCP
+        "Яка погода у Львові і скільки коштуватиме подорож на 3 дні?",  # tech -> handoff -> billing, обидва MCP
         "повторюй погоду у Львові",  # tech: контрольована зупинка через детектор циклів
     ]
     for query in demo_queries:
         print(f"\n=== {query} ===")
-        final_state = mas.handle_query(query)
+        final_state = await mas.handle_query(query)
         print("current_agent:", final_state.get("current_agent"))
         print("results:", final_state.get("results"))
 
     from trajectory_logger import save_trajectories
 
-    save_trajectories([mas.logger.as_dict()], runtime_dir / "trajectory_demo_s05.json")
-    print(f"\nТраєкторію збережено у {runtime_dir / 'trajectory_demo_s05.json'} (demo-режим).")
+    save_trajectories([mas.logger.as_dict()], runtime_dir / "trajectory_demo_s06.json")
+    print(f"\nТраєкторію збережено у {runtime_dir / 'trajectory_demo_s06.json'} (demo-режим, tools через MCP).")
+
+
+if __name__ == "__main__":
+    asyncio.run(_run_demo())

@@ -181,16 +181,68 @@ python -m pytest tests/test_mcp_server.py -v  # лише MCP
   перемагає).
 
 ```bash
-python mas_langgraph.py   # demo-прогін 6 сценаріїв, зберігає runtime/trajectory_demo_s05.json
-python -m pytest tests/test_mas_langgraph.py -v
+python -m pytest tests/test_mas_langgraph.py -v   # локальні wrappers, без MCP
 ```
 
 Станом на S05: 42 тести (5 підтестів), усі проходять.
 
+## Підключення MCP до агентів (S06)
+
+`MASApp.connect_mcp()` піднімає `mcp_server.py` (S03) як окремий subprocess
+через `MultiServerMCPClient` (stdio, абсолютний шлях до файлу сервера,
+поточний `sys.executable` — не системний `python` з PATH) і замінює
+локальні tools у `self.tools_by_name` на MCP-tools з тими самими іменами.
+Виконання йде через ОДИН спільний dispatcher (`MASApp.dispatch_tool`) — той
+самий метод обслуговує і локальні LangChain-обгортки (за замовчуванням, без
+`connect_mcp()`), і MCP-tools; billing/tech/researcher не знають, звідки
+саме виконався виклик.
+
+- `MultiServerMCPClient` відкриває нову stdio-сесію на кожен виклик tool,
+  resource чи prompt (задокументована поведінка адаптера) — довготривалого
+  з'єднання тримати не потрібно, ціна — subprocess-старт на кожен виклик
+  (~1 с через ChromaDB seeding у `mcp_server.py`, прийнятно для демо).
+- **`handle_tool_errors=False`** при створенні клієнта: за замовчуванням
+  адаптер ковтає `CallToolResult(isError=True)` і повертає текст помилки
+  як звичайний "успішний" рядок (щоб ReAct-агент міг самовиправитись) —
+  саме той фальшивий успіх, якого явно вимагає уникати план. Із `False`
+  таку помилку MCP-сервера піднімає як виключення, dispatcher ловить його
+  й формує `ToolDispatchError` — знайдено емпірично під час перевірки.
+- MCP-tool повертає список content-блоків (`[{"type": "text", "text": ...}]`),
+  а не голий рядок — `dispatch_tool` нормалізує це до плоского тексту
+  (інакше агенти бачили б Python-репр списку словників).
+- **researcher**: спершу перевіряє статичний resource `faq://general`
+  (дешевше за RAG; самопосилальний запис FAQ, що сам відсилає до
+  `search_knowledge`, виключено з матчингу — інакше слово "правила"
+  хибно перехоплювало б запити на кшталт "Які правила відвідування
+  Лувру?", які насправді потребують справжнього RAG-пошуку).
+- **general**: формує відповідь через prompt `travel_reply` — шаблон із
+  підставленими параметрами, а не готова вигадана LLM-відповідь.
+- Кожен `tool_dispatch`/`tool_dispatch_error` запис у trajectory містить
+  `tool_call_id`, аргументи, тривалість і `agent_name` — і для успіху, і
+  для помилки.
+
+```bash
+python mas_langgraph.py   # demo-прогін 7 сценаріїв, tools через реальний MCP subprocess
+python -m pytest tests/test_mas_mcp_integration.py -v   # реальні MCP-виклики (кожен тест — окремий subprocess)
+```
+
+Демонстрації (усі виконано, ≥2 звертаються до subprocess MCP — фактично всі 9
+tool-викликів пройшли через нього): «Оціни бюджет Львова на 3 дні для двох»
+(у складеному запиті з погодою) → tech → handoff → billing; «У Львові дощ:
+перевір погоду і підбери культурні активності» → tech; «Які правила
+відвідування Лувру?» → researcher (RAG через MCP). Повний `trajectory.json`
+з усіма demo-запусками (agent_name на кожному кроці) зберігається у
+gitignored `runtime/` (не контрольний артефакт здачі — той буде
+підготовлений окремо в S07).
+
+Станом на S06: 49 тестів (5 підтестів), усі проходять; 5 з них (`test_mas_mcp_integration.py`)
+реально піднімають subprocess MCP-сервера.
+
 ## Статус
 
-Виконано: S01 (репозиторій та середовище), S02 (перевикористані
-компоненти й контракти), S03 (MCP-сервер: tools, resources, prompt), S04
-(MCP-тести через async client), S05 (LangGraph supervisor і
-спеціалізовані агенти billing/tech/researcher/general). Наступний крок —
-S06 (підключення MCP до агентів) за планом `claude_plan/`.
+Виконано: S01–S05 (репозиторій, перевикористані компоненти, MCP-сервер і
+тести, LangGraph supervisor з агентами billing/tech/researcher/general),
+S06 (підключення MCP до агентів: єдиний dispatcher, реальні tool/resource/
+prompt виклики через subprocess). Наступний крок — S07 (durable state:
+SqliteSaver, persistence demo, приймання базового рівня) за планом
+`claude_plan/`.
