@@ -10,7 +10,7 @@
       "type": "simple",
       "query": "Оціни бюджет Львова на 3 дні для двох",
       "status": "pass",
-      "latency_ms": 23,
+      "latency_ms": 31,
       "agents_used": [
         "billing"
       ],
@@ -28,14 +28,14 @@
         "langchain_core": "1.6.2",
         "langgraph": "1.2.11"
       },
-      "timestamp": "2026-09-05T18:02:45.443046+00:00"
+      "timestamp": "2026-09-05T19:50:38.974166+00:00"
     },
     {
       "scenario_id": "EVAL-02",
       "type": "multi-step",
       "query": "У Львові дощ: перевір погоду і підбери культурні активності",
       "status": "pass",
-      "latency_ms": 12,
+      "latency_ms": 20,
       "agents_used": [
         "tech"
       ],
@@ -54,14 +54,14 @@
         "langchain_core": "1.6.2",
         "langgraph": "1.2.11"
       },
-      "timestamp": "2026-09-05T18:02:45.462794+00:00"
+      "timestamp": "2026-09-05T19:50:39.007106+00:00"
     },
     {
       "scenario_id": "EVAL-03",
       "type": "RAG-heavy",
       "query": "Які правила відвідування Лувру?",
       "status": "pass",
-      "latency_ms": 162,
+      "latency_ms": 173,
       "agents_used": [
         "researcher"
       ],
@@ -79,14 +79,14 @@
         "langchain_core": "1.6.2",
         "langgraph": "1.2.11"
       },
-      "timestamp": "2026-09-05T18:02:45.633368+00:00"
+      "timestamp": "2026-09-05T19:50:39.188212+00:00"
     },
     {
       "scenario_id": "EVAL-04",
       "type": "cross-agent",
       "query": "У Львові дощ: зміни маршрут і перерахуй бюджет на 3 дні для двох",
       "status": "pass",
-      "latency_ms": 24,
+      "latency_ms": 15,
       "agents_used": [
         "tech",
         "billing"
@@ -106,14 +106,14 @@
         "langchain_core": "1.6.2",
         "langgraph": "1.2.11"
       },
-      "timestamp": "2026-09-05T18:02:45.672017+00:00"
+      "timestamp": "2026-09-05T19:50:39.215661+00:00"
     },
     {
       "scenario_id": "EVAL-05",
       "type": "HITL",
       "query": "Забронюй Demo Hotel у Львові на 2 ночі за 120 EUR з 2026-10-01",
       "status": "pass",
-      "latency_ms": 123,
+      "latency_ms": 75,
       "agents_used": [
         "billing"
       ],
@@ -132,7 +132,7 @@
         "langchain_core": "1.6.2",
         "langgraph": "1.2.11"
       },
-      "timestamp": "2026-09-05T18:02:45.811036+00:00"
+      "timestamp": "2026-09-05T19:50:39.303039+00:00"
     }
   ]
 }

@@ -1,10 +1,11 @@
 # AAD Final Task — Travel Support Multi-Agent System
 
-Фінальне домашнє завдання курсу: production-подібна мультиагентна система (MAS)
-на LangGraph з MCP-сервером, guardrails, HITL, observability, evals та
-red-teaming. Базовий рівень (MAS + MCP) у розробці; підключення MCP до
-агентів, guardrails, HITL, observability/evals/red-team і бонусний рівень
-(CrewAI) буде додано на наступних кроках — див. розділ «Статус».
+Фінальне домашнє завдання курсу: production-подібна мультиагентна система
+(MAS) на LangGraph з MCP-сервером, guardrails, HITL, observability, evals,
+red-teaming, OWASP ASI matrix — і, понад базову вимогу, еквівалентна
+реалізація в CrewAI та чесне вимірюване порівняння обох фреймворків.
+Базовий, просунутий, Expert і Bonus рівні завершені (S01–S15) — деталі й
+докази по кожному кроку в розділі [Status](#status) унизу.
 
 ## Domain
 
@@ -23,13 +24,73 @@ red-teaming. Базовий рівень (MAS + MCP) у розробці; під
 Plan-and-Execute, ChromaDB RAG, TrajectoryLogger, ExecutionGuard) — детальна
 таблиця походження компонентів з'явиться на кроці S02.
 
-## Environment
+## Architecture
+
+Граф — точне відображення `MASApp._build_graph()` (`mas_langgraph.py`,
+S05/S09): один спільний `supervisor`, до якого повертається КОЖЕН
+спеціалізований вузол (щоб перевірити handoff чи завершення), а не
+лінійний конвеєр.
+
+```mermaid
+flowchart TD
+    START([START]) --> supervisor
+    supervisor -->|action| billing
+    supervisor -->|action| tech
+    supervisor -->|action| researcher
+    supervisor -->|action| general
+    supervisor -->|pending_approval| approval_gate
+    supervisor -->|completed| END([END])
+
+    billing --> supervisor
+    tech --> supervisor
+    researcher --> supervisor
+    general --> supervisor
+    approval_gate --> supervisor
+
+    subgraph billing_sub[billing subgraph]
+        planner --> executor --> replanner
+        replanner -->|replan| executor
+    end
+    subgraph tech_sub[tech subgraph]
+        agent --> tools --> agent
+    end
+
+    billing -.-> billing_sub
+    tech -.-> tech_sub
+```
+
+- **supervisor** (`_supervisor_node`): якщо `pending_approval` — прямо до
+  `approval_gate` (без LLM); якщо активний `handoff_context` і
+  `handoff_count < MAX_HANDOFFS(=1)` — прямо до цілі handoff (теж без
+  повторної LLM-класифікації); інакше `router.decide(goal)`
+  (`RouteDecision`, live LLM чи `DemoSupervisorRouter`).
+- **billing** — вкладений підграф `planner → executor → replanner`
+  (S05); `executor` зупиняється НЕ виконуючи tool, якщо крок ризиковий
+  (`RISKY_TOOLS`, S09) — `_billing_node` перетворює це на
+  `pending_approval` замість `completed`.
+- **tech** — вкладений ReAct-підграф `agent → tools → agent` (S05); може
+  встановити `handoff_context` (ціль — `бюджет`/`вартість`/`коштувати` у
+  запиті) для реального переходу до billing.
+- **researcher/general** — без вкладеного підграфа; `researcher` викликає
+  `search_knowledge` напряму (з fast-path через MCP `faq://general`,
+  S06), `general` не викликає жодного tool.
+- **approval_gate** (`_approval_gate_node`, S09) — `interrupt()`; резюме
+  через `Command(resume={"action": "approve"|"reject"|"edit", ...})`
+  повертає в `supervisor` як звичайний вузол графа.
+
+Повна trace-ієрархія одного live-запиту з реальним handoff (LangSmith,
+S10) — у розділі [Tracing](#tracing-observability-s10) нижче.
+
+## Setup
 
 - Python 3.12 (перевірено; сумісний діапазон 3.11–3.12).
-- Один LLM-провайдер обирається через змінну середовища `LLM_PROVIDER`
-  (за замовчуванням `gemini`, `GEMINI_MODEL=gemini-flash-latest`) — див.
-  `.env.example`. Модель не хардкодиться в коді (`os.getenv("GEMINI_MODEL", ...)`,
-  S10) — `-latest`-псевдонім сам вказує на актуальну рекомендовану
+- Провайдер LLM обирається ЯВНИМ параметром `provider="demo"|"gemini"|
+  "openrouter"` у конкретному скрипті (`MASApp(provider=...)`), а НЕ
+  змінною середовища — env-змінні нижче лише постачають модель/ключ для
+  обраної гілки (`GEMINI_MODEL=gemini-flash-latest` за замовчуванням) —
+  див. `.env.example`. Модель не хардкодиться в коді
+  (`os.getenv("GEMINI_MODEL", ...)`, S10) — `-latest`-псевдонім сам
+  вказує на актуальну рекомендовану
   flash-модель, оскільки конкретні версійні імена з часом деприкейтяться
   для нових ключів (перевірено емпірично: `gemini-2.5-flash`/
   `gemini-2.5-flash-lite` повертають 404 для цього ключа, `-latest` і
@@ -62,6 +123,39 @@ pip check
 smoke-imports для MCP/LangGraph/ChromaDB/Pydantic) зафіксовано в
 `codex_review/evidence/` поза цим репозиторієм (крок S01).
 
+## Run
+
+Довідник усіх точок входу (детальні прапорці й контекст — у розділі
+відповідного кроку нижче; тут лише зведення "що і як запустити").
+
+```bash
+# MAS (LangGraph) -- demo (без ключів) чи live
+python mas_langgraph.py                 # demo-запуск (__main__), кілька прикладних запитів
+python observability.py                 # 2 live-запити з LangSmith tracing (потрібен OPENROUTER_API_KEY)
+
+# MCP-сервер окремо (stdio) -- для ручної перевірки чи іншого клієнта
+python mcp_server.py
+
+# Persistence / HITL demo (S07/S09)
+python persistence_demo.py
+python hitl.py approve                  # чи reject / edit / invalid-edit / pause / resume approve
+
+# Evals / Red Team (S11/S12) -- demo (типово) чи live
+python evals.py --mode demo
+python red_team.py --mode demo
+
+# CrewAI-еквівалент (S14, окремий venv -- див. Framework Comparison нижче)
+.venv-crewai/bin/python mas_crewai.py "Скільки коштуватиме подорож до Львова на 3 дні для двох?"
+
+# Порівняння фреймворків (S15)
+python compare_frameworks.py both
+python count_loc.py
+
+# Тести
+python -m pytest tests/ -v                                  # основний venv (усе, крім CrewAI-специфічного)
+.venv-crewai/bin/python -m pytest tests/test_mas_crewai.py -v  # CrewAI-специфічні тести
+```
+
 ## Reused Components (S02)
 
 Джерело — попередні домашні завдання того ж автора (репозиторії поза цим
@@ -86,7 +180,7 @@ python -m pytest tests/ -v
 
 Станом на S02: 16 тестів (5 підтестів), усі проходять.
 
-## MCP Server (S03)
+## MCP Server: Tools, Resources, Prompts (S03)
 
 `mcp_server.py` — транспортний шар над `tools_legacy.py`/`knowledge.py`
 через офіційний MCP SDK (`mcp.server.fastmcp.FastMCP`, stdio entry point;
@@ -250,7 +344,7 @@ gitignored `runtime/` (не контрольний артефакт здачі �
 Станом на S06: 49 тестів (5 підтестів), усі проходять; 5 з них (`test_mas_mcp_integration.py`)
 реально піднімають subprocess MCP-сервера.
 
-## Durable State (S07)
+## Persistence: Durable State (S07)
 
 MAS зберігає стан через файловий `AsyncSqliteSaver` (`langgraph.checkpoint.sqlite.aio`
 — граф викликається через `ainvoke`, а синхронний `SqliteSaver` явно не
@@ -473,7 +567,7 @@ python -m pytest tests/test_hitl.py -v
 (`HitlCLICrossProcessTests`) реально запускають `hitl.py` як окремий
 subprocess (включно з переходом pause→новий процес→resume).
 
-## Observability (S10)
+## Tracing: Observability (S10)
 
 `observability.py` — конфігурація LangSmith виключно через environment
 (`is_tracing_enabled`, `configure_observability`, `project_url`). Без
@@ -566,7 +660,7 @@ tracer'а, якого тут немає. Тому: обидва live-запит�
 python observability.py
 ```
 
-## Scenario Evals (S11)
+## Evaluation: Scenario Evals (S11)
 
 `evals.py` — 5 фіксованих сценаріїв через СПРАВЖНІЙ MAS-граф
 (`MASApp.handle_query`/`Command(resume=...)`), не unit-тести окремих
@@ -861,7 +955,7 @@ RUN_LIVE_CREWAI=1 .venv-crewai/bin/python -m pytest tests/test_mas_crewai.py -v 
 `crewai` там не встановлено навмисно; звичайний `pytest tests/` лишається
 зеленим без жодної зміни поведінки.
 
-## Fair Comparison: LangGraph vs CrewAI (S15, Bonus Level)
+## Framework Comparison: LangGraph vs CrewAI (S15, Bonus Level)
 
 `compare_frameworks.py` — ОДНАКОВІ запити (той самий текст, що й EVAL-01..04
 у `evals.py`) через ОБИДВА фреймворки, **обидва live** (план прямо
@@ -912,7 +1006,7 @@ Development Sessions" у `codex_review/STEP_LOG.md` порожня з самог
 ("Не підставляти оцінки як факти"). Тому `dev_time: null` з поясненням у
 `comparison_results.json`, а не оцінка.
 
-### Аналіз
+### Results Analysis
 
 **Швидкість прототипування.** CrewAI дає РОЛЬОВУ структуру (role/goal/
 backstory) швидше на старті — не потрібно вручну проектувати граф і
