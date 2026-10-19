@@ -96,11 +96,11 @@ class LLMConfigTests(unittest.TestCase):
     def test_build_llm_uses_env_model_and_max_tokens(self) -> None:
         old_model = os.environ.get("OPENROUTER_MODEL")
         old_max = os.environ.get("OPENROUTER_MAX_TOKENS")
-        os.environ["OPENROUTER_MODEL"] = "anthropic/claude-sonnet-4.6"
+        os.environ["OPENROUTER_MODEL"] = "google/gemini-3.6-flash"
         os.environ["OPENROUTER_MAX_TOKENS"] = "2048"
         try:
             llm = mc._build_llm()
-            self.assertIn("anthropic/claude-sonnet-4.6", llm.model)
+            self.assertIn("google/gemini-3.6-flash", llm.model)
             self.assertEqual(llm.max_tokens, 2048)
         finally:
             for key, value in (("OPENROUTER_MODEL", old_model), ("OPENROUTER_MAX_TOKENS", old_max)):

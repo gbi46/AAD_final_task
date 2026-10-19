@@ -871,11 +871,10 @@ class MASApp:
             from langchain_openai import ChatOpenAI
 
             # OpenRouter — єдиний OpenAI-сумісний ендпоінт до тієї самої
-            # рекомендованої в завданні моделі (тут за замовчуванням Claude
-            # Sonnet — одна з опцій task.txt), лише інший спосіб доступу,
+            # рекомендованої в завданні моделі, лише інший спосіб доступу,
             # ніж прямий ключ провайдера; корисно, коли пряма квота
             # вичерпана чи прямого ключа немає.
-            model_name = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.6")
+            model_name = os.getenv("OPENROUTER_MODEL", "google/gemini-3.6-flash")
             # max_tokens: без явного ліміту ChatOpenAI/OpenRouter підставляють
             # верхню межу моделі (тут — 65536), а обмежений баланс ключа не
             # покриває стільки навіть для короткої відповіді — перевірено

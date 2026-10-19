@@ -21,12 +21,12 @@ TECH_TOOLS = ("get_weather", "find_activities")
 BILLING_TOOLS = ("calculate_trip_cost", "search_knowledge")
 RESEARCHER_TOOLS = ("search_knowledge",)
 
-_DEFAULT_MODEL_SLUG = "anthropic/claude-sonnet-4.6"
+_DEFAULT_MODEL_SLUG = "google/gemini-3.6-flash"
 _MAX_ITER = 6  # той самий порядок величини, що й ExecutionGuard.max_steps
 # 120 c, не 60: coordinator синхронно чекає на ВСЮ делеговану роботу
 # спеціаліста (кілька tool-раундів через реальний MCP subprocess) --
 # перший live-прогін researcher-сценарію ("Які правила відвідування
-# Лувру?") впав у TimeoutError за 60с, бо live-модель (Claude Sonnet 4.6)
+# Лувру?") впав у TimeoutError за 60с, бо live-модель
 # зробила 7+ повторних search_knowledge-запитів із трохи різними
 # формулюваннями, не задовольнившись коротким статичним корпусом (10
 # документів) з першої спроби -- виявлено емпірично, задокументовано як

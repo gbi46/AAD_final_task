@@ -198,7 +198,7 @@ def main() -> None:
     payload = {
         "methodology": {
             "queries_source": "evals.py EVAL-01..04 (той самий текст, ті самі fixtures)",
-            "model": os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.6"),
+            "model": os.getenv("OPENROUTER_MODEL", "google/gemini-3.6-flash"),
             "temperature": 0.1,
             "mcp_mode": "real MCP stdio subprocess for BOTH frameworks (MASApp.connect_mcp() for LangGraph, crewai_tools.MCPServerAdapter for CrewAI)",
             "warm_up": f"1 discarded call ({WARMUP_QUERY!r}) per framework before measured queries",

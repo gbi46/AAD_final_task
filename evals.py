@@ -286,7 +286,7 @@ async def _run_eval05(provider: str) -> dict[str, Any]:
 
 _MODEL_BY_PROVIDER = {
     "demo": None,
-    "openrouter": "anthropic/claude-sonnet-4.6 (через OpenRouter, див. .env OPENROUTER_MODEL)",
+    "openrouter": "google/gemini-3.6-flash (через OpenRouter, див. .env OPENROUTER_MODEL)",
 }
 
 
